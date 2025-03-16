@@ -1,0 +1,69 @@
+# Fichiers d'environnement et secrets
+.env
+.env.*
+*.env
+secrets.json
+config.json
+credentials.json
+
+# Fichiers Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Environnements virtuels
+venv/
+ENV/
+env/
+.venv/
+.ENV/
+
+# Fichiers spécifiques au projet
+/.qodo
+/output.mp4
+/RAG model llama copy.ipynb
+/RAG model llama.ipynb
+/two-stage-retrieval-rag-using-rerank-models.ipynb
+/Video_generator.py
+/Video_generator2.py
+
+# Fichiers système
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Fichiers d'IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Fichiers de logs
+*.log
+logs/
+log/
+
+# Fichiers temporaires
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
