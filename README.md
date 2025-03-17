@@ -1,96 +1,112 @@
-# 🤖 Modèle RAG avec Recherche Web et Reranking
+# 🤖 Adaptive RAG System with Web Search and Reranking
 
 ## 📝 Description
-Ce projet implémente un système de RAG (Retrieval-Augmented Generation) avancé utilisant un modèle de reranking pour améliorer la pertinence des réponses. L'interface utilisateur est construite avec Streamlit, offrant une expérience utilisateur intuitive et moderne.
+This project implements an advanced RAG (Retrieval-Augmented Generation) system using a reranking model to enhance response relevance. Built with Streamlit, it offers an intuitive and modern user interface. The system features a modular architecture based on nodes and edges for structured decision-making, ensuring easier maintenance and scalability.
 
-## 🎥 Démonstration
-[![Démonstration du Modèle RAG](AI%20Agent_Images/Langrah+Adaptative+RAG+model.mp4)](AI%20Agent_Images/Langrah+Adaptative+RAG+model.mp4)
+## 🎥 Demo
+[![RAG Model Demo](AI%20Agent_Images/Langrah+Adaptative+RAG+model.mp4)](AI%20Agent_Images/Langrah+Adaptative+RAG+model.mp4)
 
-## 📸 Captures d'écran
-### Interface Utilisateur
-![Interface Utilisateur](AI%20Agent_Images/1.jpg)
+## 📸 Screenshots
+### User Interface
+![User Interface](AI%20Agent_Images/1.jpg)
 
-### Résultats de Recherche
-![Résultats de Recherche](AI%20Agent_Images/2.jpg)
+### Search Results
+![Search Results](AI%20Agent_Images/2.jpg)
 
-## ✨ Fonctionnalités
-- 🔍 Recherche web intégrée
-- 🧠 Modèle RAG avec reranking
-- 🎨 Interface utilisateur moderne et responsive
-- 🔒 Gestion sécurisée des clés API
-- 📊 Affichage des résultats en temps réel
+## ✨ Key Features
+- 🔍 Integrated web search with dynamic switching between vector and web search
+- 🧠 Advanced RAG system with reranking capabilities
+- 🎨 Modern and responsive user interface
+- 🔒 Secure API key management
+- 📊 Real-time results display
+- 🎙️ Voice transcription module for generated responses
+- 🔄 Automatic hallucination detection and response relevance evaluation
+- 🔁 Smart retry system (up to 3 attempts) for quality assurance
 
-## 🛠️ Technologies Utilisées
+## 🛠️ Technologies Used
 - Python 3.x
 - Streamlit
-- Modèles de reranking
-- API de recherche web
+- LangChain
+- Langsmith
+- LangGraph
+- LLaMA
+- Vector Store
+- Web Search APIs
+- Text-to-Speech APIs
+- Embeddings
+
+## 🏗️ Architecture
+The system is built on a modular architecture featuring:
+- Node and edge-based structure for structured decision-making
+- Dynamic scoring system for document relevance evaluation
+- Automatic switching between vector search and web search
+- Pipeline for hallucination detection and response quality assessment
 
 ## 🚀 Installation
 
-1. Clonez le repository :
+1. Clone the repository:
 ```bash
-git clone [URL_DU_REPO]
-cd [NOM_DU_DOSSIER]
+git clone [REPO_URL]
+cd [FOLDER_NAME]
 ```
 
-2. Créez un environnement virtuel :
+2. Create a virtual environment:
 ```bash
 python -m venv venv
-source venv/bin/activate  # Sur Windows : venv\Scripts\activate
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
-3. Installez les dépendances :
+3. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-4. Configurez vos variables d'environnement :
+4. Configure environment variables:
 ```bash
 cp .env.example .env
-# Éditez le fichier .env avec vos clés API
+# Edit the .env file with your API keys
 ```
 
-## 💻 Utilisation
+## 💻 Usage
 
-1. Lancez l'application :
+1. Launch the application:
 ```bash
 streamlit run main.py
 ```
 
-2. Ouvrez votre navigateur à l'adresse : `http://localhost:8501`
+2. Open your browser at: `http://localhost:8501`
 
-3. Entrez votre requête dans la zone de texte et cliquez sur "Rechercher"
+3. Enter your query in the text area and click "Search"
 
-## 🔒 Sécurité
-- Les clés API sont stockées dans le fichier `.env`
-- Le fichier `.env` est exclu du contrôle de version
-- Utilisez `.env.example` comme modèle pour configurer vos variables d'environnement
+## 🔒 Security
+- API keys are stored in the `.env` file
+- `.env` file is excluded from version control
+- Use `.env.example` as a template for environment variables
 
-## 📁 Structure du Projet
+## 📁 Project Structure
 ```
 .
-├── main.py              # Application principale Streamlit
-├── Rag_model.py         # Implémentation du modèle RAG
-├── requirements.txt     # Dépendances du projet
-├── .env.example        # Modèle de configuration
-├── AI Agent_Images/    # Dossier contenant les médias
+├── main.py              # Main Streamlit application
+├── Rag_model.py         # RAG model implementation
+├── requirements.txt     # Project dependencies
+├── .env.example        # Configuration template
+├── AI Agent_Images/    # Media folder
 └── README.md           # Documentation
 ```
 
-## 🤝 Contribution
-Les contributions sont les bienvenues ! N'hésitez pas à :
-1. Fork le projet
-2. Créer une branche pour votre fonctionnalité
-3. Commiter vos changements
-4. Pousser vers la branche
-5. Ouvrir une Pull Request
+## 🤝 Contributing
+Contributions are welcome! Please:
+1. Fork the project
+2. Create a feature branch
+3. Commit your changes
+4. Push to the branch
+5. Open a Pull Request
 
-## 📄 Licence
-Ce projet est sous licence MIT. Voir le fichier `LICENSE` pour plus de détails.
+## 📄 License
+This project is licensed under the MIT License. See the `LICENSE` file for details.
 
-## 👥 Auteurs
-- [Votre Nom]
+## 👥 Authors
+- [Your Name]
 
 ## 📞 Support
-Pour toute question ou problème, veuillez ouvrir une issue dans le repository GitHub. 
+For any questions or issues, please open an issue in the GitHub repository. 
