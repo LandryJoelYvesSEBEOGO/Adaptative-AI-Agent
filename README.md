@@ -1,16 +1,14 @@
-# 🤖 Adaptive RAG System with Web Search and Reranking
+# 🤖 AI Agent: Adaptive RAG Model with Web Search and Speech-to-Text Entry
 
 ## 📝 Description
-This project implements an advanced RAG (Retrieval-Augmented Generation) system using a reranking model to enhance response relevance. Built with Streamlit, it offers an intuitive and modern user interface. The system features a modular architecture based on nodes and edges for structured decision-making, ensuring easier maintenance and scalability.
+This project implements an advanced RAG (Retrieval-Augmented Generation) system using LangGraph that is capable of choosing when to perform a web search in order to retrieve additional content and provide a more precise response to a prompt. Built with Streamlit, it offers an intuitive and modern user interface featuring a speech-to-text entry. The system features a modular architecture based on nodes and edges for structured decision-making, as well as hallucination checking and correction, ensuring easier maintenance and scalability.
 
-## 🎥 Demo
-[![RAG Model Demo](AI%20Agent_Images/Langrah+Adaptative+RAG+model.mp4)](AI%20Agent_Images/Langrah+Adaptative+RAG+model.mp4)
 
 ## 📸 Screenshots
 ### User Interface
 ![User Interface](AI%20Agent_Images/1.jpg)
 
-### Search Results
+### AI AGENT Workflow
 ![Search Results](AI%20Agent_Images/2.jpg)
 
 ## ✨ Key Features
