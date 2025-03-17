@@ -100,11 +100,5 @@ Contributions are welcome! Please:
 4. Push to the branch
 5. Open a Pull Request
 
-## 📄 License
-This project is licensed under the MIT License. See the `LICENSE` file for details.
 
-## 👥 Authors
-- [Your Name]
 
-## 📞 Support
-For any questions or issues, please open an issue in the GitHub repository. 
