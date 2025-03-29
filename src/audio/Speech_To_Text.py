@@ -80,7 +80,7 @@ class AudioRecorder:
             self.pyaudio.terminate()
 
         return output_filename
-    
+
     def transcribe_audio(self, audio_file, model_size="medium.en", device="cuda"):
         """
         Transcribe the recorded audio file

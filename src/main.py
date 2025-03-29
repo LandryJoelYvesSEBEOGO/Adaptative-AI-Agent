@@ -2,8 +2,8 @@ import streamlit as st
 import sys
 import os
 from dotenv import load_dotenv
-from Audio_test import AudioRecorder
-from Rag_model import get_final_response
+from src.audio.Speech_To_Text import AudioRecorder
+from rag.Rag_model import get_final_response
 
 # Load environment variables
 load_dotenv()
@@ -17,7 +17,7 @@ st.set_page_config(
 )
 
 # Title and description
-st.title("RAG Chatbot powered by LangGraph 💬🤖")
+st.title("💬 Langraph AI Agent: Adaptative RAG 🤖")
 st.info("Explore advanced retrieval-augmented generation with our custom RAG model", icon="📚")
 
 # Sidebar for additional info
@@ -25,8 +25,8 @@ st.sidebar.title("About the RAG Chatbot")
 st.sidebar.markdown("""
 ### How it Works
 - Retrieves relevant documents.
+- Make Web search.
 - Generates contextually-aware responses.
-- Uses advanced language models.
 """)
 
 # Initialize session state variables
