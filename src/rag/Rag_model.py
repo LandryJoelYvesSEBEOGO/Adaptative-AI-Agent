@@ -10,9 +10,11 @@ from IPython.display import Image, display
 from langchain.schema import Document
 rag_module_path = os.path.abspath("config")
 sys.path.append(rag_module_path)
-from config import Config
-from rag.Prompts import get_prompts
-from rag.Data_processing import get_retriever
+from config.Config import Config
+Rag_folder_path = os.path.abspath(os.path.join("src", "rag"))
+sys.path.append(Rag_folder_path)
+from Prompts import get_prompts
+from Data_processing import get_retriever
 import json
 import operator
 from typing import List, Annotated, Dict
