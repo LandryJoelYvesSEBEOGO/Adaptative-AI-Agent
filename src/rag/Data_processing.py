@@ -7,7 +7,7 @@ from langchain_nomic.embeddings import NomicEmbeddings
 from typing import List
 rag_module_path = os.path.abspath("config")
 sys.path.append(rag_module_path)
-from config import Config
+from config.Config import Config
 import shutil
 
 os.environ["USER_AGENT"] = "MyCustomUserAgent/1.0"
