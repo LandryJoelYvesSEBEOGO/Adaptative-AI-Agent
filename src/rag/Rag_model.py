@@ -10,7 +10,7 @@ from IPython.display import Image, display
 from langchain.schema import Document
 rag_module_path = os.path.abspath("config")
 sys.path.append(rag_module_path)
-from config.Config import Config
+from Config import Config
 Rag_folder_path = os.path.abspath(os.path.join("src", "rag"))
 sys.path.append(Rag_folder_path)
 from Prompts import get_prompts
@@ -19,7 +19,8 @@ import json
 import operator
 from typing import List, Annotated, Dict
 from typing_extensions import TypedDict
-
+from dataclasses import dataclass
+from typing import List
 # Load environment variables
 load_dotenv()
 
@@ -106,14 +107,31 @@ def grade_documents(state: Dict) -> Dict:
             web_search = "Yes"
     return {"documents": filtered_docs, "web_search": web_search}
 
+#def web_search(state: Dict) -> Dict:
+#    """Perform a web search based on the question."""
+#    print("---WEB SEARCH---")
+#    docs = web_search_tool.invoke({"query": state["question"]})
+#    web_results = "\n".join([d["content"] for d in docs])
+#    documents = state.get("documents", [])
+#    documents.append(Document(page_content=web_results))
+#    return {"documents": documents}"""
+
 def web_search(state: Dict) -> Dict:
     """Perform a web search based on the question."""
     print("---WEB SEARCH---")
-    docs = web_search_tool.invoke({"query": state["question"]})
-    web_results = "\n".join([d["content"] for d in docs])
+    results = web_search_tool.invoke({"query": state["question"]})
     documents = state.get("documents", [])
-    documents.append(Document(page_content=web_results))
+
+    for res in results:
+        content = res["content"]
+        url = res.get("url", "No URL provided")
+        doc = Document(page_content=content, metadata={"source": url})
+        documents.append(doc)
+
     return {"documents": documents}
+
+
+
 
 # Edge functions
 def route_question(state: Dict) -> str:
@@ -193,6 +211,14 @@ workflow.add_conditional_edges(
 # Compile the graph
 graph = workflow.compile()
 
+
+
+@dataclass
+class QueryResponse:
+    query_text: str
+    response_text: str
+    sources: List[str]
+
 # Final response function
 def get_final_response(query: str) -> str:
     """Run the workflow and return the final generated response."""
@@ -201,6 +227,13 @@ def get_final_response(query: str) -> str:
     final_state = graph.invoke(initial_state)
     #return final_state.get("generation", {}).get("content", "No response generated.")
     generation = final_state.get("generation")
-    if generation and hasattr(generation, "content"):
-        return generation.content
-    return "No response generated."
+
+    # Récupération des sources depuis metadata
+    documents = final_state.get("documents", [])
+    sources = [doc.metadata.get("source", "Unknown source") for doc in documents]
+
+    return QueryResponse(
+        query_text=query,
+        response_text=generation.content if hasattr(generation, "content") else str(generation),
+        sources=sources
+    )

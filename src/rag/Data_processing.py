@@ -7,9 +7,10 @@ from langchain_nomic.embeddings import NomicEmbeddings
 from typing import List
 rag_module_path = os.path.abspath("config")
 sys.path.append(rag_module_path)
-from config.Config import Config
+from Config import Config
 import shutil
 
+IS_USING_IMAGE_RUNTIME = bool(os.environ.get("IS_USING_IMAGE_RUNTIME", False))
 os.environ["USER_AGENT"] = "MyCustomUserAgent/1.0"
 
 # Liste des URLs à scraper
@@ -22,7 +23,7 @@ urls = [
 ]
 
 # Répertoire pour ChromaDB
-CHROMA_DB_DIR = "data\chroma_db"
+CHROMA_DB_DIR = os.path.join("data", "chroma_db")
 
 
 def load_web_documents(urls: List[str]):
@@ -43,14 +44,42 @@ def split_documents(docs_list: List, chunk_size: int = 1000, chunk_overlap: int 
     return text_splitter.split_documents(docs_list)
 
 
+def get_runtime_chroma_path():
+    if IS_USING_IMAGE_RUNTIME:
+        return f"/tmp/{CHROMA_DB_DIR}"
+    else:
+        return CHROMA_DB_DIR
+
+
+def copy_chroma_to_tmp():
+    dst_chroma_path = get_runtime_chroma_path()
+
+    if not os.path.exists(dst_chroma_path):
+        os.makedirs(dst_chroma_path)
+
+    tmp_contents = os.listdir(dst_chroma_path)
+    if len(tmp_contents) == 0:
+        print(f"Copying ChromaDB from {CHROMA_DB_DIR} to {dst_chroma_path}")
+        os.makedirs(dst_chroma_path, exist_ok=True)
+        shutil.copytree(CHROMA_DB_DIR, dst_chroma_path, dirs_exist_ok=True)
+    else:
+        print(f"✅ ChromaDB already exists in {dst_chroma_path}")
+
 
 def get_or_create_chroma_db(doc_splits: List, persist_directory: str = CHROMA_DB_DIR, clear_db: bool = False):
     """ 
     Vérifie si ChromaDB existe déjà et met à jour uniquement avec les nouveaux documents.
     Si clear_db est True, supprime complètement le dossier contenant la base et le recrée.
     """
+    # Hack needed for AWS Lambda's base Python image (to work with an updated version of SQLite).
+        # In Lambda runtime, we need to copy ChromaDB to /tmp so it can have write permissions.
+    if IS_USING_IMAGE_RUNTIME:
+            __import__("pysqlite3")
+            sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+            copy_chroma_to_tmp()
+
     embedding_model = NomicEmbeddings(
-        model=Config.NomicEmbeddings_model, inference_mode="local", device="cuda"
+        model=Config.NomicEmbeddings_model, inference_mode="local", device="cpu"
     )
 
     # 🔴 Si clear_db est True, on supprime totalement le dossier
@@ -91,7 +120,7 @@ def get_retriever(k: int = 3):
     web_docs = load_web_documents(urls)
 
     # Charger automatiquement tous les PDFs du dossier "Dataset"
-    pdf_docs = load_pdf_documents_from_folder("data\\raw")
+    pdf_docs = load_pdf_documents_from_folder(os.path.join("data", "raw"))
     
     # Fusionner les deux listes de documents
     all_docs = web_docs + pdf_docs
