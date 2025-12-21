@@ -8,13 +8,15 @@ from langchain_community.tools.tavily_search.tool import TavilySearchResults
 from langgraph.graph import StateGraph, END
 from IPython.display import Image, display
 from langchain.schema import Document
-rag_module_path = os.path.abspath("config")
-sys.path.append(rag_module_path)
+
+# Ajouter le répertoire racine du projet au sys.path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 from config.Config import Config
-Rag_folder_path = os.path.abspath(os.path.join("src", "rag"))
-sys.path.append(Rag_folder_path)
-from Prompts import get_prompts
-from Data_processing import get_retriever
+from src.rag.Prompts import get_prompts
+from src.rag.Data_processing import get_retriever
 import json
 import operator
 from typing import List, Annotated, Dict
