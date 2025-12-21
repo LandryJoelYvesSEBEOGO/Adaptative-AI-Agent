@@ -73,6 +73,12 @@ class Config:
     METADATA_MAX_ENTITIES = 10  # Nombre maximum d'entités
     METADATA_MAX_TOPICS = 3  # Nombre maximum de sujets
     METADATA_SUMMARY_MAX_LENGTH = 100  # Longueur max du résumé en mots
+    # Configuration Métriques Retrieval
+    RETRIEVAL_METRICS_ENABLED = True  # Activer/désactiver l'enregistrement des résultats retrieval
+    RETRIEVAL_METRICS_FILE = os.path.join(project_root, "data", "metrics", "retrieval_results.jsonl")
+        # Configuration Citations Automatiques
+    CITATIONS_ENABLED = True  # Activer/désactiver les citations automatiques
+    CITATION_FORMAT = "numeric"  # Format des citations: "numeric" ([1], [2]) ou "inline" (source name)
 
 # Global variables
 class SPEAKER_TYPES:

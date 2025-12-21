@@ -49,6 +49,10 @@ def get_prompts(
         Now, review the user question:\n\n{question}
         Provide an answer to this question using only the above context. 
         Use three sentences maximum and keep the answer concise.
+        
+        IMPORTANT: When referencing information from the context, cite your sources using the format [1], [2], [3], etc., where the number corresponds to the document number in the context above.
+        For example: "Python is a programming language [1] that supports multiple paradigms [2]."
+        
         Answer:""",
 
         # Hallucination Grader
