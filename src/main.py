@@ -93,11 +93,21 @@ if user_input:
     with st.chat_message("user"):
         st.write(user_input)
 
-    # Generate assistant response
+# Generate assistant response
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
-            # Generate response using the RAG model
-            response = get_final_response(user_input)
-            st.write(response)
-            # Add assistant message to chat history
-            st.session_state.messages.append({"role": "assistant", "content": response})
+            try:
+                # Generate response using the RAG model
+                response = get_final_response(user_input)
+                st.write(response)
+                # Add assistant message to chat history
+                st.session_state.messages.append({"role": "assistant", "content": response})
+            except Exception as e:
+                error_message = f"⚠️ Une erreur s'est produite lors de la génération de la réponse. Veuillez réessayer."
+                st.error(error_message)
+                st.session_state.messages.append({
+                    "role": "assistant", 
+                    "content": error_message
+                })
+                # Log l'erreur pour debugging (en production, utiliser un logger)
+                print(f"❌ Erreur dans main.py: {str(e)}")

@@ -7,7 +7,9 @@ def get_prompts(
     hallucination_grader_prompt=None,
     answer_grader_instructions=None,
     answer_grader_prompt=None,
-    Rewritting_prompt=None 
+    Rewritting_prompt=None,
+    multi_criteria_grader_instructions=None,
+    multi_criteria_grader_prompt=None,
 ):
     """
     Génère et retourne un ensemble de prompts pour différentes étapes d'un système de question-réponse basé sur la récupération de documents.
@@ -96,7 +98,38 @@ def get_prompts(
             - Return only the rewritten query, without additional commentary.
 
             Please provide your rewritten version of the query below:
-            """
+            """,
+        # Multi-Criteria Document Grader Instructions
+        "multi_criteria_grader_instructions": multi_criteria_grader_instructions or """You are an expert grader assessing document relevance using multiple criteria.
+
+Evaluate each document on 5 dimensions (0.0 to 1.0):
+1. RELEVANCE: How semantically relevant is the document to the question? (0.0 = not relevant, 1.0 = highly relevant)
+2. COVERAGE: How well does the document cover/address the question? (0.0 = no coverage, 1.0 = complete coverage)
+3. FRESHNESS: How recent/fresh is the information? (0.0 = outdated, 1.0 = very recent) - Use 0.7 if date unknown
+4. AUTHORITY: How authoritative/trustworthy is the source? (0.0 = unreliable, 1.0 = highly authoritative) - Use 0.7 if unknown
+5. CLARITY: How clear and well-structured is the content? (0.0 = unclear, 1.0 = very clear)
+
+Return a JSON object with:
+- 'scores': object with keys 'relevance', 'coverage', 'freshness', 'authority', 'clarity' (each 0.0-1.0)
+- 'overall_score': weighted average (float 0.0-1.0)
+- 'accepted': boolean indicating if document should be used (based on threshold >= 0.6)
+- 'reasoning': brief explanation of the scores (2-3 sentences)""",
+
+        "multi_criteria_grader_prompt": multi_criteria_grader_prompt or """Here is the retrieved document:
+{document}
+
+Here is the user question:
+{question}
+
+Evaluate the document on all 5 criteria and provide detailed scores. Consider:
+- RELEVANCE: Does the document directly relate to the question topic?
+- COVERAGE: Does it answer parts of or the full question?
+- FRESHNESS: Is the information current? (Estimate if date not provided)
+- AUTHORITY: Is the source credible? (Infer from domain/context if not explicit)
+- CLARITY: Is the content easy to understand and well-organized?
+
+Return a JSON object with the structure specified in the instructions."""
+
 
     }
 
