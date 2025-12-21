@@ -2,8 +2,14 @@ import streamlit as st
 import sys
 import os
 from dotenv import load_dotenv
+
+# Ajouter le répertoire racine du projet au sys.path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 from src.audio.Speech_To_Text import AudioRecorder
-from rag.Rag_model import get_final_response
+from src.rag.Rag_model import get_final_response
 
 # Load environment variables
 load_dotenv()

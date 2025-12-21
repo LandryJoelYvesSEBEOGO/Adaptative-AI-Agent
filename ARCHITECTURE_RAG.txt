@@ -1,0 +1,856 @@
+================================================================================
+                   ARCHITECTURE COMPLÈTE DU SYSTÈME RAG
+                  Agent Adaptatif avec LangGraph
+================================================================================
+
+Date de création : Document d'architecture technique
+Version : 1.0
+
+================================================================================
+TABLE DES MATIÈRES
+================================================================================
+
+1. Vue d'ensemble du système
+2. Architecture générale
+3. Composants principaux
+4. Flux de données et workflow
+5. Détails techniques des modules
+6. Structure des données
+7. Gestion d'état (State Management)
+8. Système de prompts
+9. Pipeline de traitement des documents
+10. Mécanismes de qualité et validation
+
+================================================================================
+1. VUE D'ENSEMBLE DU SYSTÈME
+================================================================================
+
+Le système RAG (Retrieval-Augmented Generation) est un agent intelligent qui 
+combine plusieurs technologies pour fournir des réponses précises et contextuelles :
+
+- LangGraph : Orchestration du workflow adaptatif avec graphe d'états
+- Groq API : Modèle de langage pour la génération (LLaMA 3 / GPT-OSS-120B)
+- ChromaDB : Base de données vectorielle pour la recherche sémantique
+- Nomic Embeddings : Modèle d'embedding pour la représentation vectorielle
+- Tavily : Recherche web pour les informations récentes
+- Streamlit : Interface utilisateur web interactive
+- Whisper (Faster-Whisper) : Transcription audio en texte
+
+Le système est adaptatif car il décide automatiquement :
+- Si la question nécessite une recherche dans la base vectorielle locale
+- Si la question nécessite une recherche web pour des informations récentes
+- Si les documents récupérés sont pertinents
+- Si la réponse générée est de qualité suffisante
+
+================================================================================
+2. ARCHITECTURE GÉNÉRALE
+================================================================================
+
+Le système suit une architecture en couches :
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    COUCHE PRÉSENTATION                           │
+│                  (src/main.py - Streamlit)                       │
+│  - Interface utilisateur web                                     │
+│  - Gestion des interactions chat                                 │
+│  - Enregistrement vocal (optionnel)                              │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────────────┐
+│                    COUCHE APPLICATION                            │
+│              (src/rag/Rag_model.py - LangGraph)                  │
+│  - Orchestration du workflow                                    │
+│  - Gestion des états                                            │
+│  - Routing intelligent                                          │
+│  - Validation et grading                                        │
+└───────────────┬────────────────────────────┬────────────────────┘
+                │                            │
+┌───────────────▼────────────┐  ┌───────────▼────────────────────┐
+│   COUCHE RETRIEVAL          │  │   COUCHE GÉNÉRATION            │
+│  (src/rag/Data_processing)  │  │   (Groq API)                   │
+│  - Chargement documents     │  │   - Génération de réponse      │
+│  - Embeddings               │  │   - Réécriture de requête      │
+│  - Base vectorielle ChromaDB│  │   - Évaluation de qualité      │
+└─────────────────────────────┘  └───────────────────────────────┘
+                │                            │
+                └────────────┬───────────────┘
+                             │
+                ┌────────────▼──────────────┐
+                │   COUCHE CONFIGURATION     │
+                │   (config/Config.py)       │
+                │   - Variables d'env        │
+                │   - Clés API               │
+                │   - Configuration modèles  │
+                └────────────────────────────┘
+
+================================================================================
+3. COMPOSANTS PRINCIPAUX
+================================================================================
+
+3.1 COUCHE PRÉSENTATION (src/main.py)
+-------------------------------------
+Responsabilités :
+- Affichage de l'interface utilisateur Streamlit
+- Gestion de l'état de session (messages, enregistrement audio)
+- Capture des entrées utilisateur (texte ou audio)
+- Affichage des réponses générées
+
+Composants :
+- AudioRecorder : Gestion de l'enregistrement et transcription audio
+- get_final_response() : Point d'entrée vers le système RAG
+
+Flux :
+1. L'utilisateur saisit une question (texte ou voix)
+2. Si voix : transcription via Whisper
+3. Appel à get_final_response(query)
+4. Affichage de la réponse dans l'interface
+
+3.2 COUCHE ORCHESTRATION (src/rag/Rag_model.py)
+-----------------------------------------------
+Responsabilités :
+- Définition du workflow LangGraph
+- Gestion de l'état global (GraphState)
+- Coordination entre les différents nœuds
+- Décisions conditionnelles (routing)
+
+Composants clés :
+- GraphState : Structure de données pour l'état du workflow
+- StateGraph : Graphe d'états LangGraph
+- Nœuds : retrieve, generate, grade_documents, web_search
+- Fonctions de routing : route_question, decide_to_generate, 
+                        grade_generation_v_documents_and_question
+
+3.3 COUCHE RETRIEVAL (src/rag/Data_processing.py)
+--------------------------------------------------
+Responsabilités :
+- Chargement des documents (web et PDF)
+- Segmentation des documents en chunks
+- Génération d'embeddings
+- Stockage dans ChromaDB
+- Récupération de documents pertinents
+
+Fonctions principales :
+- load_web_documents() : Charge documents depuis URLs
+- load_pdf_documents() : Charge documents PDF
+- split_documents() : Segmente en chunks (1000 tokens, overlap 200)
+- get_or_create_chroma_db() : Gère la base vectorielle
+- get_retriever() : Crée le retriever pour la recherche
+
+3.4 COUCHE CONFIGURATION (config/Config.py)
+--------------------------------------------
+Responsabilités :
+- Chargement des variables d'environnement
+- Configuration des modèles
+- Gestion des clés API
+- Variables d'environnement globales
+
+Éléments configurés :
+- GROQ_API_KEY : Clé pour l'API Groq
+- TAVILY_API_KEY : Clé pour Tavily Search
+- LANGSMITH_API_KEY : Clé pour le tracing (optionnel)
+- GROQ_model : Nom du modèle (par défaut: "openai/gpt-oss-120b")
+- NomicEmbeddings_model : Modèle d'embedding (par défaut: "nomic-embed-text-v1.5")
+
+3.5 COUCHE PROMPTS (src/rag/Prompts.py)
+----------------------------------------
+Responsabilités :
+- Définition de tous les prompts utilisés par le système
+- Personnalisation possible des prompts
+
+Prompts définis :
+- router_instructions : Instructions pour router la question
+- doc_grader_prompt : Évaluation de pertinence des documents
+- rag_prompt : Prompt pour la génération RAG
+- hallucination_grader_prompt : Détection d'hallucinations
+- answer_grader_prompt : Évaluation de la qualité de la réponse
+- Rewritting_prompt : Réécriture de la requête utilisateur
+
+================================================================================
+4. FLUX DE DONNÉES ET WORKFLOW
+================================================================================
+
+Le workflow LangGraph suit ce flux :
+
+                    ┌─────────────┐
+                    │   QUERY     │
+                    │  (Question) │
+                    └──────┬──────┘
+                           │
+                    ┌──────▼──────────────┐
+                    │  Rewrite_query()    │
+                    │  (Réécriture)       │
+                    └──────┬──────────────┘
+                           │
+                    ┌──────▼──────────────────────┐
+                    │   route_question()          │
+                    │   (Routing initial)         │
+                    └──────┬──────────────────────┘
+                           │
+            ┌──────────────┴──────────────┐
+            │                             │
+    ┌───────▼───────┐          ┌─────────▼──────────┐
+    │  websearch    │          │    retrieve        │
+    │  (Tavily)     │          │  (ChromaDB)        │
+    └───────┬───────┘          └─────────┬──────────┘
+            │                            │
+            │                    ┌───────▼──────────────┐
+            │                    │  grade_documents     │
+            │                    │  (Évaluation docs)   │
+            │                    └───────┬──────────────┘
+            │                            │
+            │              ┌─────────────┴─────────────┐
+            │              │                           │
+    ┌───────▼──────────────▼──────────┐      ┌────────▼────────┐
+    │   decide_to_generate()          │      │  (Retour web    │
+    │   (Si docs non pertinents)      │      │   search)       │
+    └───────┬──────────────────────────┘      └─────────────────┘
+            │
+    ┌───────▼────────┐
+    │    generate    │
+    │  (Génération)  │
+    └───────┬────────┘
+            │
+    ┌───────▼──────────────────────────────────┐
+    │ grade_generation_v_documents_and_question│
+    │ (Validation réponse)                      │
+    └───────┬──────────────────────────────────┘
+            │
+    ┌───────┴────────────────────────────────────┐
+    │                                            │
+    ├─ "useful" → END (Réponse finale)          │
+    ├─ "not useful" → websearch (recherche web) │
+    ├─ "not supported" → generate (retry)       │
+    └─ "max retries" → END (limite atteinte)    │
+
+4.1 ÉTAPE 1 : Réécriture de la requête (Rewrite_query)
+------------------------------------------------------
+Objectif : Améliorer la clarté et la précision de la question
+
+Processus :
+- Utilise le LLM (Groq) avec le Rewritting_prompt
+- Préserve le sens original
+- Améliore la structure et la clarté
+- Retourne une requête optimisée
+
+4.2 ÉTAPE 2 : Routing initial (route_question)
+-----------------------------------------------
+Objectif : Décider si utiliser la base vectorielle ou la recherche web
+
+Critères de décision :
+- Base vectorielle : Questions sur agents, prompt engineering, adversarial 
+                     attacks, LLMs (contenu déjà indexé)
+- Recherche web : Questions sur événements récents, informations non 
+                  indexées, sujets non couverts
+
+Processus :
+- Le LLM en mode JSON analyse la question
+- Retourne {"datasource": "vectorstore" ou "websearch"}
+
+4.3 ÉTAPE 3A : Récupération vectorielle (retrieve)
+---------------------------------------------------
+Objectif : Trouver les documents les plus pertinents dans ChromaDB
+
+Processus :
+- Convertit la question en embedding (Nomic Embeddings)
+- Recherche les k=3 documents les plus similaires
+- Retourne une liste de documents (chunks)
+
+4.4 ÉTAPE 3B : Recherche web (web_search)
+------------------------------------------
+Objectif : Obtenir des informations récentes depuis le web
+
+Processus :
+- Utilise TavilySearchResults avec k=3 résultats
+- Combine les résultats en un seul document
+- Ajoute au contexte existant si des documents ont déjà été récupérés
+
+4.5 ÉTAPE 4 : Évaluation des documents (grade_documents)
+--------------------------------------------------------
+Objectif : Filtrer les documents non pertinents
+
+Processus :
+- Pour chaque document récupéré :
+  * Le LLM évalue la pertinence (doc_grader_prompt)
+  * Retourne un score binaire (yes/no)
+  * Si un document est non pertinent, active le flag web_search = "Yes"
+- Retourne uniquement les documents pertinents
+
+4.6 ÉTAPE 5 : Décision de génération (decide_to_generate)
+----------------------------------------------------------
+Objectif : Décider si générer directement ou ajouter une recherche web
+
+Processus :
+- Si web_search == "Yes" : Route vers web_search
+- Sinon : Route vers generate
+
+4.7 ÉTAPE 6 : Génération de réponse (generate)
+-----------------------------------------------
+Objectif : Générer une réponse basée sur les documents récupérés
+
+Processus :
+- Formate les documents en texte (format_docs)
+- Construit le prompt RAG avec contexte et question
+- Appelle le LLM (Groq) pour générer la réponse
+- Incrémente loop_step pour le suivi des itérations
+
+4.8 ÉTAPE 7 : Validation de la réponse (grade_generation_v_documents_and_question)
+-----------------------------------------------------------------------------------
+Objectif : Vérifier la qualité de la réponse générée
+
+Double vérification :
+
+A. Vérification des hallucinations (hallucination_grader) :
+   - Compare la réponse avec les documents sources
+   - Vérifie que la réponse est "grounded" (basée sur les faits)
+   - Si "no" : Retry (si max_retries non atteint) ou arrêt
+
+B. Vérification de l'utilité (answer_grader) :
+   - Évalue si la réponse répond à la question
+   - Si "yes" : Réponse finale acceptée
+   - Si "no" : Route vers web_search pour plus d'informations
+
+Décisions possibles :
+- "useful" : Réponse acceptée → END
+- "not useful" : Réponse insuffisante → web_search
+- "not supported" : Hallucination détectée → generate (retry)
+- "max retries" : Limite de tentatives atteinte → END
+
+================================================================================
+5. DÉTAILS TECHNIQUES DES MODULES
+================================================================================
+
+5.1 MODULE : Rag_model.py
+-------------------------
+
+Fonctions principales :
+
+1. Rewrite_query(query: str) -> str
+   - Entrée : Question originale de l'utilisateur
+   - Sortie : Question réécrite optimisée
+   - Utilise : local_llm, Rewritting_prompt
+
+2. retrieve(state: Dict) -> Dict
+   - Entrée : État avec "question"
+   - Sortie : État avec "documents" (liste de Document)
+   - Utilise : retriever (ChromaDB)
+
+3. generate(state: Dict) -> Dict
+   - Entrée : État avec "documents" et "question"
+   - Sortie : État avec "generation" (Message) et "loop_step" incrémenté
+   - Utilise : local_llm, rag_prompt
+
+4. grade_documents(state: Dict) -> Dict
+   - Entrée : État avec "documents" et "question"
+   - Sortie : État avec "documents" filtrés et "web_search" flag
+   - Utilise : llm_json_mode, doc_grader_prompt
+
+5. web_search(state: Dict) -> Dict
+   - Entrée : État avec "question" (optionnellement "documents")
+   - Sortie : État avec "documents" mis à jour (ajout résultats web)
+   - Utilise : web_search_tool (Tavily)
+
+6. route_question(state: Dict) -> str
+   - Entrée : État avec "question"
+   - Sortie : "websearch" ou "vectorstore"
+   - Utilise : llm_json_mode, router_instructions
+
+7. decide_to_generate(state: Dict) -> str
+   - Entrée : État avec "web_search" flag
+   - Sortie : "websearch" ou "generate"
+
+8. grade_generation_v_documents_and_question(state: Dict) -> str
+   - Entrée : État avec "generation", "documents", "question", "loop_step"
+   - Sortie : "useful", "not useful", "not supported", "max retries"
+   - Utilise : llm_json_mode, hallucination_grader, answer_grader
+
+9. get_final_response(query: str) -> str
+   - Fonction principale appelée par l'interface
+   - Orchestre tout le workflow
+   - Retourne la réponse finale sous forme de string
+
+GraphState Structure :
+- question: str - La question de l'utilisateur
+- generation: str - La réponse générée (Message object)
+- web_search: str - Flag "Yes" ou "No" pour recherche web
+- max_retries: int - Nombre max de tentatives (pas explicitement défini)
+- answers: int - Non utilisé actuellement
+- loop_step: Annotated[int, operator.add] - Compteur d'itérations
+- documents: List[str] - Liste des documents récupérés
+
+5.2 MODULE : Data_processing.py
+--------------------------------
+
+Fonctions principales :
+
+1. load_web_documents(urls: List[str]) -> List[Document]
+   - Charge des documents depuis des URLs web
+   - Utilise : WebBaseLoader (LangChain)
+   - Retourne : Liste de Documents
+
+2. load_pdf_documents(pdf_paths: List[str]) -> List[Document]
+   - Charge des documents PDF
+   - Utilise : PyPDFLoader (LangChain)
+   - Retourne : Liste de Documents
+
+3. split_documents(docs_list: List, chunk_size=1000, chunk_overlap=200)
+   - Segmente les documents en chunks
+   - Utilise : RecursiveCharacterTextSplitter avec encodeur tiktoken
+   - Paramètres :
+     * chunk_size : 1000 tokens
+     * chunk_overlap : 200 tokens (pour préserver le contexte)
+
+4. get_or_create_chroma_db(doc_splits, persist_directory, clear_db=False)
+   - Gère la base de données vectorielle ChromaDB
+   - Si clear_db=True : Supprime et recrée la base
+   - Sinon : Charge la base existante ou la crée
+   - Utilise : NomicEmbeddings avec device="cuda" (ou "cpu")
+
+5. load_pdf_documents_from_folder(folder_path: str) -> List[Document]
+   - Charge automatiquement tous les PDFs d'un dossier
+   - Parcourt le dossier "data/raw"
+   - Retourne : Liste combinée de Documents
+
+6. get_retriever(k: int = 3) -> Retriever
+   - Fonction principale pour créer le retriever
+   - Processus :
+     a. Charge documents web (URLs définies dans urls)
+     b. Charge PDFs depuis "data/raw"
+     c. Fusionne les deux listes
+     d. Segmente en chunks
+     e. Crée/met à jour ChromaDB
+     f. Retourne le retriever avec k=3
+
+URLs par défaut indexées :
+- https://lilianweng.github.io/posts/2023-06-23-agent/
+- https://lilianweng.github.io/posts/2023-03-15-prompt-engineering/
+- https://lilianweng.github.io/posts/2023-10-25-adv-attack-llm/
+- https://en.wikipedia.org/wiki/Large_language_model
+- https://arxiv.org/pdf/2503.11651v1
+
+5.3 MODULE : Prompts.py
+-----------------------
+
+Fonction principale :
+
+get_prompts(**kwargs) -> Dict[str, str]
+- Retourne un dictionnaire de tous les prompts
+- Permet la personnalisation via paramètres optionnels
+- Chaque prompt peut être surchargé individuellement
+
+Prompts détaillés :
+
+1. router_instructions
+   - Rôle : Guide le LLM pour router les questions
+   - Contenu : Liste des sujets dans la base vectorielle
+   - Format de réponse : JSON avec clé "datasource"
+
+2. doc_grader_instructions + doc_grader_prompt
+   - Rôle : Évaluer la pertinence d'un document
+   - Critères : Présence de mots-clés ou sens sémantique
+   - Format de réponse : JSON avec "binary_score" (yes/no)
+
+3. rag_prompt
+   - Rôle : Générer la réponse finale
+   - Instructions : Utiliser uniquement le contexte fourni
+   - Contraintes : 3 phrases maximum, concis
+
+4. hallucination_grader_instructions + hallucination_grader_prompt
+   - Rôle : Détecter les hallucinations
+   - Critères : Réponse basée sur les faits (FACTS)
+   - Format : JSON avec "binary_score" et "explanation"
+
+5. answer_grader_instructions + answer_grader_prompt
+   - Rôle : Évaluer si la réponse répond à la question
+   - Critères : Réponse adéquate (peut contenir infos supplémentaires)
+   - Format : JSON avec "binary_score" et "explanation"
+
+6. Rewritting_prompt
+   - Rôle : Améliorer la clarté de la requête
+   - Instructions : Préserver sens, améliorer structure
+   - Format : Retourne uniquement la requête réécrite
+
+5.4 MODULE : main.py (Streamlit)
+---------------------------------
+
+Composants :
+
+1. Configuration Streamlit
+   - page_title: "RAG Chatbot"
+   - page_icon: "🤖"
+   - layout: "centered"
+
+2. État de session (st.session_state)
+   - recorder : Instance AudioRecorder
+   - is_recording : État d'enregistrement
+   - audio_file : Fichier audio enregistré
+   - transcription : Transcription de l'audio
+   - messages : Historique des messages du chat
+
+3. Fonctionnalités
+   - Interface de chat interactif
+   - Enregistrement vocal via sidebar
+   - Transcription automatique
+   - Affichage en temps réel des messages
+
+Flux utilisateur :
+1. Utilisateur saisit question OU enregistre audio
+2. Si audio : Transcription → insertion automatique
+3. Question envoyée à get_final_response()
+4. Réponse affichée dans le chat
+5. Historique conservé dans session_state.messages
+
+5.5 MODULE : Speech_To_Text.py
+-------------------------------
+
+Classe AudioRecorder :
+
+Méthodes :
+
+1. __init__(sample_rate=44100, channels=1, chunk_size=1024)
+   - Initialise les paramètres audio
+   - Dans main.py : sample_rate=16000, channels=1
+
+2. start_recording()
+   - Démarre l'enregistrement dans un thread séparé
+   - Utilise PyAudio pour capturer le flux audio
+   - Stocke les frames dans self.frames
+
+3. stop_recording(output_filename="output.wav")
+   - Arrête l'enregistrement
+   - Sauvegarde en fichier WAV
+   - Retourne le nom du fichier
+
+4. transcribe_audio(audio_file, model_size="medium.en", device="cuda")
+   - Transcrit l'audio en texte
+   - Utilise Faster-Whisper (modèle medium.en)
+   - Supprime le fichier audio après transcription
+   - Retourne la transcription textuelle
+
+================================================================================
+6. STRUCTURE DES DONNÉES
+================================================================================
+
+6.1 GraphState (TypedDict)
+---------------------------
+Structure de l'état global du workflow :
+
+{
+    "question": str,              # Question de l'utilisateur (réécrite)
+    "generation": Message,        # Réponse générée (objet LangChain Message)
+    "web_search": str,            # "Yes" ou "No"
+    "max_retries": int,           # Limite de tentatives (non défini explicitement)
+    "answers": int,               # Non utilisé actuellement
+    "loop_step": int,             # Compteur d'itérations (auto-incrémenté)
+    "documents": List[Document]   # Liste des documents récupérés
+}
+
+6.2 Document (LangChain)
+------------------------
+Structure d'un document dans le système :
+
+{
+    page_content: str,            # Contenu textuel du document
+    metadata: dict                # Métadonnées (source, titre, etc.)
+}
+
+6.3 Message (LangChain)
+-----------------------
+Structure d'un message LLM :
+
+{
+    content: str,                 # Contenu textuel
+    type: str,                    # "human", "ai", "system"
+    additional_kwargs: dict       # Arguments supplémentaires
+}
+
+6.4 Structure des fichiers
+--------------------------
+Répertoires principaux :
+
+projet/
+├── config/
+│   └── Config.py                 # Configuration globale
+├── data/
+│   ├── chroma_db/                # Base vectorielle ChromaDB (générée)
+│   └── raw/                      # PDFs à indexer
+├── src/
+│   ├── main.py                   # Point d'entrée Streamlit
+│   ├── audio/
+│   │   └── Speech_To_Text.py    # Transcription audio
+│   └── rag/
+│       ├── Rag_model.py         # Workflow LangGraph
+│       ├── Data_processing.py   # Traitement documents
+│       └── Prompts.py           # Définition prompts
+└── .env                          # Variables d'environnement
+
+================================================================================
+7. GESTION D'ÉTAT (STATE MANAGEMENT)
+================================================================================
+
+7.1 État LangGraph (GraphState)
+--------------------------------
+L'état est partagé entre tous les nœuds du graphe :
+- Mutation : Les nœuds peuvent modifier l'état
+- Persistance : L'état persiste entre les transitions
+- Typage : TypedDict garantit la structure
+
+7.2 État Streamlit (session_state)
+-----------------------------------
+Géré par Streamlit pour la session utilisateur :
+- recorder : Instance persistante AudioRecorder
+- messages : Historique conversationnel
+- is_recording : État d'enregistrement audio
+- audio_file : Fichier audio temporaire
+- transcription : Texte transcrit
+
+7.3 Flux d'état dans le workflow
+---------------------------------
+1. Initialisation : GraphState(question=query_rewrite)
+2. Chaque nœud modifie l'état et le passe au suivant
+3. Les conditions (edges) utilisent l'état pour décider
+4. Finalisation : État contient "generation" finale
+
+================================================================================
+8. SYSTÈME DE PROMPTS
+================================================================================
+
+8.1 Architecture des prompts
+-----------------------------
+Chaque prompt est structuré en deux parties :
+- Instructions : Contexte et règles générales
+- Prompt : Template avec variables ({context}, {question}, etc.)
+
+8.2 Stratégie de prompt engineering
+------------------------------------
+- Système + Utilisateur : Séparation claire des instructions
+- Format JSON : Pour les réponses structurées (graders)
+- Format libre : Pour la génération de texte
+- Context-aware : Les prompts utilisent le contexte récupéré
+
+8.3 Personnalisation
+--------------------
+La fonction get_prompts() accepte des paramètres optionnels :
+- Permet de surcharger n'importe quel prompt
+- Utile pour l'expérimentation et l'adaptation
+- Valeurs par défaut définies dans le code
+
+================================================================================
+9. PIPELINE DE TRAITEMENT DES DOCUMENTS
+================================================================================
+
+9.1 Phase d'indexation (première exécution)
+--------------------------------------------
+1. Chargement des sources :
+   a. Documents web (URLs configurées)
+   b. PDFs depuis data/raw/
+
+2. Segmentation :
+   - Chunk size : 1000 tokens
+   - Overlap : 200 tokens
+   - Utilise tiktoken pour compter précisément
+
+3. Embedding :
+   - Modèle : nomic-embed-text-v1.5
+   - Mode : local (inference_mode="local")
+   - Device : CUDA si disponible, sinon CPU
+
+4. Stockage :
+   - Base : ChromaDB
+   - Persistance : data/chroma_db/
+   - Index : Automatique par ChromaDB
+
+9.2 Phase de recherche (à chaque requête)
+------------------------------------------
+1. Question → Embedding
+2. Recherche vectorielle : k=3 documents les plus similaires
+3. Retour : Liste de Documents avec scores de similarité
+
+9.3 Mise à jour de la base
+---------------------------
+- Si clear_db=False : La base existante est utilisée
+- Nouveaux documents : Non ajoutés automatiquement
+- Pour réindexer : Modifier clear_db=True dans get_or_create_chroma_db()
+
+================================================================================
+10. MÉCANISMES DE QUALITÉ ET VALIDATION
+================================================================================
+
+10.1 Système de grading en cascade
+-----------------------------------
+Triple vérification de qualité :
+
+Niveau 1 : Évaluation des documents (grade_documents)
+- Vérifie la pertinence de chaque document
+- Score binaire par document
+- Active web_search si documents non pertinents
+
+Niveau 2 : Vérification des hallucinations (hallucination_grader)
+- Compare réponse avec documents sources
+- Détecte informations non basées sur les faits
+- Protège contre la génération d'informations inventées
+
+Niveau 3 : Évaluation de l'utilité (answer_grader)
+- Vérifie que la réponse répond à la question
+- Peut contenir des informations supplémentaires
+- Garantit la pertinence finale
+
+10.2 Mécanisme de retry
+-----------------------
+- Loop step tracking : Compte les itérations
+- Max retries : Limite pour éviter boucles infinies
+- Stratégies de retry :
+  * "not supported" → Régénération avec mêmes documents
+  * "not useful" → Recherche web supplémentaire
+
+10.3 Gestion d'erreurs implicite
+---------------------------------
+- Si génération échoue : Retourne "No response generated."
+- Si retriever vide : Documents vides passent au grading
+- Si web search échoue : Documents vides ajoutés (gestion d'exception implicite)
+
+================================================================================
+11. DÉPENDANCES ET TECHNOLOGIES
+================================================================================
+
+11.1 Bibliothèques principales
+-------------------------------
+- streamlit : Interface web
+- langchain-groq : Intégration Groq API
+- langchain-community : Loaders et outils
+- langchain-core : Types et messages
+- langgraph : Orchestration workflow
+- langchain-nomic : Embeddings Nomic
+- chromadb : Base vectorielle
+- faster-whisper : Transcription audio
+- pyaudio : Capture audio
+- python-dotenv : Variables d'environnement
+- tiktoken : Tokenisation
+
+11.2 APIs externes
+------------------
+- Groq API : Génération LLM
+- Tavily API : Recherche web
+- LangSmith API : Tracing (optionnel)
+
+11.3 Ressources locales
+-----------------------
+- Nomic Embeddings : Modèle local (téléchargé automatiquement)
+- Whisper : Modèle local (téléchargé automatiquement)
+- ChromaDB : Stockage local sur disque
+
+================================================================================
+12. POINTS D'ENTRÉE ET EXÉCUTION
+================================================================================
+
+12.1 Point d'entrée principal
+------------------------------
+Fichier : src/main.py
+Commande : streamlit run src/main.py
+
+12.2 Initialisation du système
+-------------------------------
+Lors du premier appel à get_final_response() :
+1. Chargement de Config (variables d'env)
+2. Initialisation LLMs (Groq)
+3. Création retriever (charge/met à jour ChromaDB)
+4. Chargement prompts
+5. Compilation du graphe LangGraph
+
+12.3 Cycle de vie d'une requête
+--------------------------------
+1. Utilisateur → Interface Streamlit
+2. get_final_response(query)
+3. Rewrite_query(query)
+4. Exécution workflow LangGraph
+5. Retour réponse → Interface Streamlit
+6. Affichage utilisateur
+
+Temps estimé par requête :
+- Simple (vectorstore seulement) : 3-5 secondes
+- Avec recherche web : 5-8 secondes
+- Avec retry : 8-15 secondes
+
+================================================================================
+13. CONFIGURATION ET PERSONNALISATION
+================================================================================
+
+13.1 Modèles configurables
+---------------------------
+- GROQ_model : Modèle LLM (actuellement "openai/gpt-oss-120b")
+- NomicEmbeddings_model : Modèle d'embedding
+- Whisper model_size : Taille du modèle Whisper
+
+13.2 Paramètres de recherche
+-----------------------------
+- k (retriever) : Nombre de documents récupérés (défaut: 3)
+- k (Tavily) : Nombre de résultats web (défaut: 3)
+- chunk_size : Taille des chunks (défaut: 1000)
+- chunk_overlap : Chevauchement (défaut: 200)
+
+13.3 Personnalisation des prompts
+----------------------------------
+- Modifier Prompts.py directement
+- Ou passer des paramètres à get_prompts()
+
+13.4 Ajout de sources
+---------------------
+- URLs : Modifier la liste `urls` dans Data_processing.py
+- PDFs : Ajouter fichiers dans data/raw/
+- Réindexer : Modifier clear_db=True temporairement
+
+================================================================================
+14. LIMITATIONS ET CONSIDÉRATIONS
+================================================================================
+
+14.1 Limitations actuelles
+---------------------------
+- max_retries non défini explicitement (risque de boucle infinie)
+- Pas de gestion explicite des erreurs API
+- ChromaDB non mise à jour automatiquement avec nouveaux documents
+- Pas de cache pour éviter réindexation à chaque exécution
+- Whisper nécessite CUDA pour performance optimale
+
+14.2 Considérations de performance
+-----------------------------------
+- Première exécution : Lente (indexation documents)
+- Embeddings : Plus rapides avec CUDA
+- Recherche vectorielle : Très rapide (millisecondes)
+- Génération LLM : Dépend de l'API Groq (latence réseau)
+- Recherche web : Dépend de Tavily (latence réseau)
+
+14.3 Considérations de coût
+---------------------------
+- Groq API : Payant selon usage (vérifier tarifs)
+- Tavily API : Payant selon usage (vérifier tarifs)
+- Embeddings : Gratuit (local)
+- Whisper : Gratuit (local)
+
+================================================================================
+15. EXTENSIONS POSSIBLES
+================================================================================
+
+15.1 Améliorations potentielles
+--------------------------------
+- Ajout d'un système de cache pour les réponses fréquentes
+- Implémentation d'un reranker pour améliorer la pertinence
+- Support multi-langues
+- Historique conversationnel dans le workflow
+- Streaming des réponses (pour meilleure UX)
+- Gestion explicite des erreurs avec retry
+- Interface admin pour gérer les sources de documents
+- Métriques et logging détaillés
+
+15.2 Intégrations possibles
+----------------------------
+- Base de données pour historique persistant
+- API REST en plus de Streamlit
+- Support de plus de formats de documents
+- Intégration avec autres bases vectorielles
+
+================================================================================
+FIN DU DOCUMENT
+================================================================================
+
+Ce document décrit l'architecture complète du système RAG adaptatif.
+Pour toute question ou clarification, consulter le code source correspondant.
+

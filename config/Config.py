@@ -22,8 +22,18 @@ class Config:
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
     #Configuration des models 
-    GROQ_model="llama3-8b-8192"
+    GROQ_model="openai/gpt-oss-120b"
     NomicEmbeddings_model="nomic-embed-text-v1.5"
+
+        # Configuration du workflow
+    MAX_RETRIES = 3  # Nombre maximum de tentatives en cas d'échec
+    RETRY_BACKOFF_FACTOR = 2  # Facteur d'exponentiel backoff
+    RETRY_INITIAL_DELAY = 1  # Délai initial en secondes
+    
+    # Timeouts (en secondes)
+    LLM_TIMEOUT = 30
+    RETRIEVAL_TIMEOUT = 10
+    WEB_SEARCH_TIMEOUT = 15
 
 
 # Global variables

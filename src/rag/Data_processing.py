@@ -5,8 +5,12 @@ from langchain_community.vectorstores import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_nomic.embeddings import NomicEmbeddings
 from typing import List
-rag_module_path = os.path.abspath("config")
-sys.path.append(rag_module_path)
+
+# Ajouter le répertoire racine du projet au sys.path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 from config.Config import Config
 import shutil
 
@@ -21,8 +25,8 @@ urls = [
     "https://arxiv.org/pdf/2503.11651v1"
 ]
 
-# Répertoire pour ChromaDB
-CHROMA_DB_DIR = "data\chroma_db"
+# Répertoire pour ChromaDB (chemin absolu basé sur le répertoire racine du projet)
+CHROMA_DB_DIR = os.path.join(project_root, "data", "chroma_db")
 
 
 def load_web_documents(urls: List[str]):
@@ -90,8 +94,9 @@ def get_retriever(k: int = 3):
     # Charger les documents web
     web_docs = load_web_documents(urls)
 
-    # Charger automatiquement tous les PDFs du dossier "Dataset"
-    pdf_docs = load_pdf_documents_from_folder("data\\raw")
+    # Charger automatiquement tous les PDFs du dossier "data/raw"
+    raw_data_folder = os.path.join(project_root, "data", "raw")
+    pdf_docs = load_pdf_documents_from_folder(raw_data_folder)
     
     # Fusionner les deux listes de documents
     all_docs = web_docs + pdf_docs
