@@ -48,6 +48,20 @@ class Config:
     HYBRID_SEARCH_ENABLED = True  # Activer/désactiver hybrid search
     VECTOR_SEARCH_WEIGHT = 0.7  # Poids pour recherche vectorielle (70%)
     BM25_SEARCH_WEIGHT = 0.3  # Poids pour recherche BM25 (30%)
+        # Configuration Reranker
+    RERANKER_ENABLED = True  # Activer/désactiver le reranker
+    RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"  # Modèle cross-encoder
+    RERANKER_TOP_K = 20  # Nombre de documents à récupérer avant reranking
+    RERANKER_FINAL_K = 3  # Nombre de documents à retourner après reranking
+        # Configuration Document Grading Multi-Critères
+    MULTI_CRITERIA_GRADING_ENABLED = True  # Activer/désactiver le grading multi-critères
+    GRADING_RELEVANCE_WEIGHT = 0.35  # Poids pour Relevance (35%)
+    GRADING_COVERAGE_WEIGHT = 0.25  # Poids pour Coverage (25%)
+    GRADING_FRESHNESS_WEIGHT = 0.15  # Poids pour Freshness (15%)
+    GRADING_AUTHORITY_WEIGHT = 0.15  # Poids pour Authority (15%)
+    GRADING_CLARITY_WEIGHT = 0.10  # Poids pour Clarity (10%)
+    GRADING_ACCEPTANCE_THRESHOLD = 0.6  # Seuil d'acceptation (0-1)
+    GRADING_ADAPTIVE_THRESHOLD = True  # Seuil adaptatif basé sur les scores moyens
 
 
 # Global variables

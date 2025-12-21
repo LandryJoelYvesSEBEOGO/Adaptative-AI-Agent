@@ -11,6 +11,7 @@ from IPython.display import Image, display
 from langchain.schema import Document
 from typing import List, Annotated, Dict, Optional, Callable
 from typing_extensions import TypedDict
+from sentence_transformers import CrossEncoder
 import json
 import operator
 
@@ -63,8 +64,16 @@ def get_retriever_instance():
     if _retriever is None:
         print("[INIT] ⏳ Initialisation du retriever (première fois, peut prendre du temps)...")
         try:
-            _retriever = get_retriever()
-            print("[INIT] ✅ Retriever créé.")
+            # Si reranker activé, récupérer plus de documents pour le reranking
+            reranker_enabled = getattr(Config, 'RERANKER_ENABLED', True)
+            if reranker_enabled:
+                reranker_top_k = getattr(Config, 'RERANKER_TOP_K', 20)
+                _retriever = get_retriever(k=reranker_top_k)
+                print(f"[INIT] ✅ Retriever créé avec k={reranker_top_k} (pour reranking).")
+            else:
+                final_k = getattr(Config, 'RERANKER_FINAL_K', 3)
+                _retriever = get_retriever(k=final_k)
+                print(f"[INIT] ✅ Retriever créé avec k={final_k}.")
             
             # IMPORTANT: Précharger le modèle d'embedding pour éviter le blocage au premier appel
             # Cela force le chargement du modèle en mémoire maintenant plutôt que lors du premier invoke
@@ -164,7 +173,73 @@ class GraphState(TypedDict):
     conversation_id: Optional[str]  # ID de conversation pour métriques
     latencies: Optional[Dict[str, float]]  # Latences pour métriques
 
+# Reranker global (lazy loading)
+_reranker = None
 
+def get_reranker_instance():
+    """Récupère ou crée le reranker cross-encoder (lazy loading)."""
+    global _reranker
+    if _reranker is None:
+        reranker_enabled = getattr(Config, 'RERANKER_ENABLED', True)
+        if not reranker_enabled:
+            return None
+        
+        reranker_model = getattr(Config, 'RERANKER_MODEL', 'cross-encoder/ms-marco-MiniLM-L-6-v2')
+        print(f"[RERANKER] ⏳ Initialisation du reranker: {reranker_model}...")
+        try:
+            _reranker = CrossEncoder(reranker_model)
+            print("[RERANKER] ✅ Reranker initialisé avec succès")
+        except Exception as e:
+            print(f"[RERANKER] ❌ Erreur lors de l'initialisation: {str(e)}")
+            print("[RERANKER] Le reranking sera désactivé pour cette session")
+            return None
+    return _reranker
+
+def rerank_documents(query: str, documents: List[Document], top_k: int = None) -> List[Document]:
+    """
+    Rerank les documents avec un cross-encoder.
+    
+    Args:
+        query: La question de l'utilisateur
+        documents: Liste de documents à reranker
+        top_k: Nombre de documents à retourner après reranking
+    
+    Returns:
+        Liste de documents rerankés (top_k premiers)
+    """
+    if not documents or len(documents) == 0:
+        return documents
+    
+    reranker = get_reranker_instance()
+    if reranker is None:
+        # Si reranker non disponible, retourner les documents originaux
+        return documents[:top_k] if top_k else documents
+    
+    if top_k is None:
+        top_k = getattr(Config, 'RERANKER_FINAL_K', 3)
+    
+    try:
+        # Préparer les paires (query, document) pour le cross-encoder
+        pairs = [[query, doc.page_content] for doc in documents]
+        
+        # Calculer les scores de pertinence
+        scores = reranker.predict(pairs)
+        
+        # Créer une liste de tuples (score, document) et trier par score décroissant
+        scored_docs = list(zip(scores, documents))
+        scored_docs.sort(key=lambda x: x[0], reverse=True)
+        
+        # Retourner les top_k documents
+        reranked_docs = [doc for _, doc in scored_docs[:top_k]]
+        
+        return reranked_docs
+        
+    except Exception as e:
+        print(f"[RERANKER] ⚠️ Erreur lors du reranking: {str(e)}")
+        print("[RERANKER] Retour des documents originaux (sans reranking)")
+        return documents[:top_k] if top_k else documents
+
+        
 # Node functions
 def retrieve(state: Dict) -> Dict:
     """Retrieve documents from the vector store."""
@@ -195,11 +270,29 @@ def retrieve(state: Dict) -> Dict:
         # Le threading peut causer des conflits avec le runtime de LangGraph
         # Appel direct: si ça bloque, c'est que le problème vient de NomicEmbeddings/ChromaDB
         try:
-            print("[RETRIEVE] ⏳ Debut de retriever.invoke()...")
+            # Déterminer les paramètres du reranker
+            reranker_enabled = getattr(Config, 'RERANKER_ENABLED', True)
+            final_k = getattr(Config, 'RERANKER_FINAL_K', 3)
+            
+            # Le retriever a déjà été configuré avec le bon k dans get_retriever_instance
+            print("[RETRIEVE] ⏳ Début de retriever.invoke()...")
             documents = current_retriever.invoke(state["question"])
+            
+            # Appliquer le reranking si activé
+            if reranker_enabled and len(documents) > 1:
+                print(f"[RETRIEVE] ⏳ Reranking de {len(documents)} documents (top-{final_k})...")
+                rerank_start = time.time()
+                documents = rerank_documents(state["question"], documents, top_k=final_k)
+                rerank_time = time.time() - rerank_start
+                latencies["reranking"] = rerank_time
+                print(f"[RETRIEVE] ✅ Reranking terminé en {rerank_time:.3f}s ({len(documents)} documents finaux)")
+            elif not reranker_enabled:
+                # Si reranker désactivé, prendre les k premiers
+                documents = documents[:final_k]
+            
             elapsed_time = time.time() - start_time
             latencies["retrieval"] = elapsed_time
-            print(f"[RETRIEVE] ✅ retriever.invoke() termine avec succes en {elapsed_time:.2f}s")
+            print(f"[RETRIEVE] ✅ retriever.invoke() terminé avec succès en {elapsed_time:.2f}s")
         except Exception as e:
             elapsed_time = time.time() - start_time
             latencies["retrieval"] = elapsed_time
@@ -318,7 +411,7 @@ def generate(state: Dict) -> Dict:
 
 
 def grade_documents(state: Dict) -> Dict:
-    """Grade the relevance of retrieved documents."""
+    """Grade the relevance of retrieved documents using multi-criteria evaluation."""
     start_time = time.time()
     conversation_id = state.get("conversation_id", "unknown")
     latencies = state.get("latencies", {})
@@ -334,35 +427,119 @@ def grade_documents(state: Dict) -> Dict:
             latencies["grading"] = elapsed_time
             return {"documents": [], "web_search": "Yes", "latencies": latencies}
         
+        # Vérifier si multi-criteria grading est activé
+        multi_criteria_enabled = getattr(Config, 'MULTI_CRITERIA_GRADING_ENABLED', True)
+        
+        all_scores = []  # Pour seuil adaptatif
+        
         for doc in state["documents"]:
             try:
-                doc_grader_prompt_formatted = prompt["doc_grader_prompt"].format(
-                    document=doc.page_content, 
-                    question=state["question"]
-                )
-                
-                def _grade():
-                    return llm_json_mode.invoke(
-                        [SystemMessage(content=prompt["doc_grader_instructions"])] +
-                        [HumanMessage(content=doc_grader_prompt_formatted)]
+                multi_criteria_failed = False                
+                if multi_criteria_enabled:
+                    # Grading multi-critères
+                    grader_prompt_formatted = prompt["multi_criteria_grader_prompt"].format(
+                        document=doc.page_content[:4000],  # Limiter la longueur pour éviter token limit
+                        question=state["question"]
                     )
-                
-                result = retry_with_backoff(_grade)
-                
-                # Parse JSON avec gestion d'erreur
-                try:
-                    grade_data = json.loads(result.content)
-                    grade = grade_data.get("binary_score", "no")
-                except json.JSONDecodeError as e:
-                    print(f"⚠️ Erreur parsing JSON: {str(e)}. Score par défaut: no")
-                    grade = "no"
-                
-                if grade.lower() == "yes":
-                    print("---GRADE: DOCUMENT RELEVANT---")
-                    filtered_docs.append(doc)
-                else:
-                    print("---GRADE: DOCUMENT NOT RELEVANT---")
-                    web_search = "Yes"
+                    
+                    def _grade():
+                        return llm_json_mode.invoke(
+                            [SystemMessage(content=prompt["multi_criteria_grader_instructions"])] +
+                            [HumanMessage(content=grader_prompt_formatted)]
+                        )
+                    
+                    result = retry_with_backoff(_grade)
+                    
+                    try:
+                        grade_data = json.loads(result.content)
+                        
+                        # Extraire les scores
+                        scores = grade_data.get("scores", {})
+                        relevance = float(scores.get("relevance", 0.0))
+                        coverage = float(scores.get("coverage", 0.0))
+                        freshness = float(scores.get("freshness", 0.7))  # Default si inconnu
+                        authority = float(scores.get("authority", 0.7))  # Default si inconnu
+                        clarity = float(scores.get("clarity", 0.7))
+                        
+                        # Calculer le score pondéré
+                        weights = {
+                            "relevance": getattr(Config, 'GRADING_RELEVANCE_WEIGHT', 0.35),
+                            "coverage": getattr(Config, 'GRADING_COVERAGE_WEIGHT', 0.25),
+                            "freshness": getattr(Config, 'GRADING_FRESHNESS_WEIGHT', 0.15),
+                            "authority": getattr(Config, 'GRADING_AUTHORITY_WEIGHT', 0.15),
+                            "clarity": getattr(Config, 'GRADING_CLARITY_WEIGHT', 0.10)
+                        }
+                        
+                        overall_score = (
+                            relevance * weights["relevance"] +
+                            coverage * weights["coverage"] +
+                            freshness * weights["freshness"] +
+                            authority * weights["authority"] +
+                            clarity * weights["clarity"]
+                        )
+                        
+                        # Utiliser le score du LLM si fourni, sinon utiliser notre calcul
+                        overall_score = float(grade_data.get("overall_score", overall_score))
+                        all_scores.append(overall_score)
+                        
+                        # Déterminer le seuil
+                        acceptance_threshold = getattr(Config, 'GRADING_ACCEPTANCE_THRESHOLD', 0.6)
+                        adaptive_threshold = getattr(Config, 'GRADING_ADAPTIVE_THRESHOLD', True)
+                        
+                        if adaptive_threshold and len(all_scores) > 1:
+                            # Seuil adaptatif : moyenne des scores * 0.8 (plus permissif)
+                            threshold = (sum(all_scores) / len(all_scores)) * 0.8
+                            threshold = max(threshold, acceptance_threshold * 0.7)  # Minimum 70% du seuil fixe
+                        else:
+                            threshold = acceptance_threshold
+                        
+                        accepted = grade_data.get("accepted", overall_score >= threshold)
+                        reasoning = grade_data.get("reasoning", "")
+                        
+                        print(f"---GRADE: Score={overall_score:.2f} (R:{relevance:.2f}, C:{coverage:.2f}, F:{freshness:.2f}, A:{authority:.2f}, Cl:{clarity:.2f}) | Threshold={threshold:.2f}---")
+                        if reasoning:
+                            print(f"  Reasoning: {reasoning[:150]}...")
+                        
+                        if accepted and overall_score >= threshold:
+                            print(f"✅ DOCUMENT ACCEPTED (score: {overall_score:.2f})")
+                            filtered_docs.append(doc)
+                        else:
+                            print(f"❌ DOCUMENT REJECTED (score: {overall_score:.2f} < threshold: {threshold:.2f})")
+                            web_search = "Yes"
+                            
+                    except (json.JSONDecodeError, ValueError, KeyError) as e:
+                        print(f"⚠️ Erreur parsing JSON multi-criteria: {str(e)}. Fallback sur grading binaire pour ce document.")
+                        multi_criteria_failed = True
+                    
+                if not multi_criteria_enabled or multi_criteria_failed:
+                    # Grading binaire (fallback ou désactivé)
+                    doc_grader_prompt_formatted = prompt["doc_grader_prompt"].format(
+                        document=doc.page_content[:4000],
+                        question=state["question"]
+                    )
+                    
+                    def _grade():
+                        return llm_json_mode.invoke(
+                            [SystemMessage(content=prompt["doc_grader_instructions"])] +
+                            [HumanMessage(content=doc_grader_prompt_formatted)]
+                        )
+                    
+                    result = retry_with_backoff(_grade)
+                    
+                    try:
+                        grade_data = json.loads(result.content)
+                        grade = grade_data.get("binary_score", "no")
+                    except json.JSONDecodeError as e:
+                        print(f"⚠️ Erreur parsing JSON: {str(e)}. Score par défaut: no")
+                        grade = "no"
+                    
+                    if grade.lower() == "yes":
+                        print("---GRADE: DOCUMENT RELEVANT---")
+                        filtered_docs.append(doc)
+                    else:
+                        print("---GRADE: DOCUMENT NOT RELEVANT---")
+                        web_search = "Yes"
+                        
             except Exception as e:
                 print(f"⚠️ Erreur lors du grading d'un document: {str(e)}. Document ignoré.")
                 web_search = "Yes"
@@ -376,11 +553,18 @@ def grade_documents(state: Dict) -> Dict:
             extra={
                 "component": "grading",
                 "conversation_id": conversation_id,
-                "data": {"latency": elapsed_time, "num_filtered": len(filtered_docs)}
+                "data": {
+                    "latency": elapsed_time,
+                    "num_filtered": len(filtered_docs),
+                    "num_total": len(state.get("documents", [])),
+                    "multi_criteria": multi_criteria_enabled,
+                    "avg_score": sum(all_scores) / len(all_scores) if all_scores else 0.0
+                }
             }
         )
         
         return {"documents": filtered_docs, "web_search": web_search, "latencies": latencies}
+        
     except Exception as e:
         elapsed_time = time.time() - start_time
         latencies["grading"] = elapsed_time
@@ -392,7 +576,6 @@ def grade_documents(state: Dict) -> Dict:
         )
         # En cas d'erreur, on continue avec tous les documents
         return {"documents": state.get("documents", []), "web_search": "Yes", "latencies": latencies}
-
 
 def web_search(state: Dict) -> Dict:
     """Perform a web search based on the question."""
