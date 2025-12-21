@@ -62,7 +62,23 @@ class Config:
     GRADING_CLARITY_WEIGHT = 0.10  # Poids pour Clarity (10%)
     GRADING_ACCEPTANCE_THRESHOLD = 0.6  # Seuil d'acceptation (0-1)
     GRADING_ADAPTIVE_THRESHOLD = True  # Seuil adaptatif basé sur les scores moyens
-
+        # Configuration Enrichissement Métadonnées
+    METADATA_ENRICHMENT_ENABLED = True  # Activer/désactiver l'enrichissement
+    METADATA_DETECT_LANGUAGE = False  # Détection de langue (False = "en" par défaut pour l'instant)
+    METADATA_EXTRACT_ENTITIES = True  # Extraire les entités nommées
+    METADATA_EXTRACT_KEYWORDS = True  # Extraire les mots-clés
+    METADATA_EXTRACT_TOPICS = True  # Extraire les sujets
+    METADATA_EXTRACT_SUMMARY = True  # Générer un résumé
+    METADATA_MAX_KEYWORDS = 5  # Nombre maximum de mots-clés
+    METADATA_MAX_ENTITIES = 10  # Nombre maximum d'entités
+    METADATA_MAX_TOPICS = 3  # Nombre maximum de sujets
+    METADATA_SUMMARY_MAX_LENGTH = 100  # Longueur max du résumé en mots
+    # Configuration Métriques Retrieval
+    RETRIEVAL_METRICS_ENABLED = True  # Activer/désactiver l'enregistrement des résultats retrieval
+    RETRIEVAL_METRICS_FILE = os.path.join(project_root, "data", "metrics", "retrieval_results.jsonl")
+        # Configuration Citations Automatiques
+    CITATIONS_ENABLED = True  # Activer/désactiver les citations automatiques
+    CITATION_FORMAT = "numeric"  # Format des citations: "numeric" ([1], [2]) ou "inline" (source name)
 
 # Global variables
 class SPEAKER_TYPES:

@@ -1,6 +1,13 @@
 import os
 import sys
 import pickle
+import uuid
+import json
+from datetime import datetime
+from langchain.schema import Document
+import re
+from langchain_groq import ChatGroq
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_community.document_loaders import WebBaseLoader, PyPDFLoader
 from langchain_community.vectorstores import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -48,7 +55,12 @@ def split_documents(docs_list: List, chunk_size: int = 1000, chunk_overlap: int 
     text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
         chunk_size=chunk_size, chunk_overlap=chunk_overlap
     )
-    return text_splitter.split_documents(docs_list)
+    doc_splits = text_splitter.split_documents(docs_list)
+    
+    # Enrichir les métadonnées
+    enriched_splits = enrich_document_metadata(doc_splits)
+    
+    return enriched_splits
 
 
 def _save_bm25_documents(doc_splits):
@@ -72,7 +84,198 @@ def _load_bm25_documents():
         print(f"[WARNING] Impossible de charger BM25 cache: {str(e)}")
     return None
 
+# LLM global pour l'extraction de métadonnées (singleton pattern)
+_metadata_llm = None
 
+def _get_metadata_llm():
+    """Récupère ou crée le LLM pour l'extraction de métadonnées (lazy loading)."""
+    global _metadata_llm
+    if _metadata_llm is None:
+        _metadata_llm = ChatGroq(
+            model_name=Config.GROQ_model,
+            temperature=0,
+            model_kwargs={"response_format": {"type": "json_object"}},
+            groq_api_key=Config.GROQ_API_KEY
+        )
+    return _metadata_llm
+
+def _extract_advanced_metadata(doc: Document) -> dict:
+    """
+    Extrait des métadonnées avancées d'un document en utilisant le LLM.
+    
+    Args:
+        doc: Document LangChain à analyser
+    
+    Returns:
+        Dictionnaire avec entities, keywords, topics, summary
+    """
+    advanced_metadata = {}
+    
+    # Vérifier quelles extractions sont activées
+    extract_entities = getattr(Config, 'METADATA_EXTRACT_ENTITIES', True)
+    extract_keywords = getattr(Config, 'METADATA_EXTRACT_KEYWORDS', True)
+    extract_topics = getattr(Config, 'METADATA_EXTRACT_TOPICS', True)
+    extract_summary = getattr(Config, 'METADATA_EXTRACT_SUMMARY', True)
+    
+    # Si aucune extraction n'est activée, retourner vide
+    if not any([extract_entities, extract_keywords, extract_topics, extract_summary]):
+        return advanced_metadata
+    
+    try:
+        # Limiter la longueur du texte pour éviter les limites de tokens
+        content = doc.page_content[:3000]  # Limiter à 3000 caractères
+        
+        if not content.strip():
+            return advanced_metadata
+        
+        # Préparer le prompt pour l'extraction
+        max_keywords = getattr(Config, 'METADATA_MAX_KEYWORDS', 5)
+        max_entities = getattr(Config, 'METADATA_MAX_ENTITIES', 10)
+        max_topics = getattr(Config, 'METADATA_MAX_TOPICS', 3)
+        summary_length = getattr(Config, 'METADATA_SUMMARY_MAX_LENGTH', 100)
+        
+        extraction_prompt = f"""Analyze the following text and extract metadata. Return a JSON object with:
+"""
+        
+        if extract_keywords:
+            extraction_prompt += f"- 'keywords': list of {max_keywords} most important keywords (max {max_keywords} items)\n"
+        
+        if extract_entities:
+            extraction_prompt += f"- 'entities': list of named entities (persons, organizations, locations, etc., max {max_entities} items)\n"
+        
+        if extract_topics:
+            extraction_prompt += f"- 'topics': list of {max_topics} main topics/subjects (max {max_topics} items)\n"
+        
+        if extract_summary:
+            extraction_prompt += f"- 'summary': a brief summary in max {summary_length} words\n"
+        
+        extraction_prompt += f"""
+Text to analyze:
+{content}
+
+Return only valid JSON, no additional text."""
+
+        # Appeler le LLM (utilise le singleton)
+        llm_json = _get_metadata_llm()
+        response = llm_json.invoke([HumanMessage(content=extraction_prompt)])
+        
+        # Parser la réponse JSON
+        if hasattr(response, 'content'):
+            extracted_data = json.loads(response.content)
+            
+            if extract_keywords and 'keywords' in extracted_data:
+                keywords = extracted_data['keywords']
+                if isinstance(keywords, list):
+                    advanced_metadata['keywords'] = keywords[:max_keywords]
+            
+            if extract_entities and 'entities' in extracted_data:
+                entities = extracted_data['entities']
+                if isinstance(entities, list):
+                    advanced_metadata['entities'] = entities[:max_entities]
+            
+            if extract_topics and 'topics' in extracted_data:
+                topics = extracted_data['topics']
+                if isinstance(topics, list):
+                    advanced_metadata['topics'] = topics[:max_topics]
+            
+            if extract_summary and 'summary' in extracted_data:
+                summary = extracted_data['summary']
+                if isinstance(summary, str):
+                    advanced_metadata['summary'] = summary
+        
+    except json.JSONDecodeError as e:
+        print(f"[WARNING] Erreur parsing JSON pour extraction métadonnées: {str(e)}")
+    except Exception as e:
+        print(f"[WARNING] Erreur lors de l'extraction de métadonnées avancées: {str(e)}")
+        # En cas d'erreur, continuer sans ces métadonnées
+    
+    return advanced_metadata
+
+
+def enrich_document_metadata(doc_splits: List[Document]) -> List[Document]:
+    """
+    Enrichit les métadonnées des documents avec des informations structurelles.
+    
+    Args:
+        doc_splits: Liste de documents (chunks) à enrichir
+    
+    Returns:
+        Liste de documents avec métadonnées enrichies
+    """
+    if not doc_splits:
+        return doc_splits
+    
+    metadata_enabled = getattr(Config, 'METADATA_ENRICHMENT_ENABLED', True)
+    if not metadata_enabled:
+        print("[INFO] Enrichissement des métadonnées désactivé")
+        return doc_splits
+    
+    print("[INFO] Enrichissement des métadonnées des documents...")
+    
+    # Grouper les chunks par document parent (basé sur source ou créer des groupes)
+    # Pour l'instant, on groupe par 'source' dans les métadonnées
+    parent_groups = {}
+    for idx, doc in enumerate(doc_splits):
+        source = doc.metadata.get('source', f'unknown_{idx}')
+        if source not in parent_groups:
+            parent_groups[source] = []
+        parent_groups[source].append((idx, doc))
+    
+    # Générer un ID unique pour chaque document parent
+    parent_ids = {}
+    for source in parent_groups:
+        parent_ids[source] = str(uuid.uuid4())
+    
+    # Enrichir chaque chunk
+    enriched_docs = []
+    processed_at = datetime.now().isoformat()
+    
+    for source, chunks in parent_groups.items():
+        parent_doc_id = parent_ids[source]
+        total_chunks = len(chunks)
+        
+        for chunk_index, (original_idx, doc) in enumerate(chunks):
+             # Créer une copie des métadonnées existantes
+            enriched_metadata = doc.metadata.copy() if doc.metadata else {}
+            
+            # Ajouter les métadonnées structurelles
+            enriched_metadata['chunk_id'] = str(uuid.uuid4())
+            enriched_metadata['parent_doc_id'] = parent_doc_id
+            enriched_metadata['chunk_index'] = chunk_index
+            enriched_metadata['total_chunks'] = total_chunks
+            
+            # Métadonnées techniques
+            enriched_metadata['processed_at'] = processed_at
+            if 'created_at' not in enriched_metadata:
+                enriched_metadata['created_at'] = processed_at
+            
+            # Langue (détection simple pour l'instant)
+            detect_language = getattr(Config, 'METADATA_DETECT_LANGUAGE', False)
+            if detect_language:
+                # TODO: Implémenter la détection de langue plus tard
+                enriched_metadata['language'] = 'en'  # Par défaut
+            else:
+                enriched_metadata['language'] = 'en'  # Par défaut pour l'instant
+            
+            # Extraire les métadonnées avancées (entities, keywords, topics, summary)
+            advanced_metadata = _extract_advanced_metadata(doc)
+            enriched_metadata.update(advanced_metadata)
+            
+            # Créer un nouveau document avec les métadonnées enrichies
+            enriched_doc = Document(
+                page_content=doc.page_content,
+                metadata=enriched_metadata
+            )
+            enriched_docs.append((original_idx, enriched_doc))
+    
+    # Réorganiser selon l'ordre original et retourner uniquement les documents
+    enriched_docs.sort(key=lambda x: x[0])
+    result = [doc for _, doc in enriched_docs]
+    
+    print(f"[INFO] ✅ {len(result)} documents enrichis avec métadonnées structurelles")
+    print(f"[INFO]   - {len(parent_groups)} documents parents identifiés")
+    
+    return result
 
 def get_or_create_chroma_db(doc_splits: List, persist_directory: str = CHROMA_DB_DIR, clear_db: bool = False):
     """ 

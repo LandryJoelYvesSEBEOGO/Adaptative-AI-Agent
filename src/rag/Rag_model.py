@@ -2,6 +2,8 @@
 import os 
 import sys
 import time
+import re
+from typing import Tuple
 from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -30,6 +32,7 @@ from src.core.exceptions import (
 )
 import uuid
 from src.core.metrics import get_metrics_collector
+from src.core.retrieval_metrics import get_retrieval_metrics_collector
 from src.core.logger import get_logger
 
 # Initialiser logger et metrics
@@ -153,11 +156,98 @@ def Rewrite_query(query: str) -> str:
 
 
 # Post-processing function for formatting documents
-def format_docs(docs):
-    """Format documents for display."""
+def format_docs(docs, with_citations: bool = True):
+    """
+    Format documents for display with optional citation numbers.
+    
+    Args:
+        docs: Liste de documents
+        with_citations: Si True, ajoute des numéros de référence [1], [2], etc.
+    
+    Returns:
+        String formatée avec les documents
+    """
     if not docs:
         return ""
-    return "\n\n".join(doc.page_content for doc in docs if hasattr(doc, 'page_content'))
+    
+    if not with_citations:
+        return "\n\n".join(doc.page_content for doc in docs if hasattr(doc, 'page_content'))
+    
+    formatted_parts = []
+    for idx, doc in enumerate(docs, start=1):
+        if hasattr(doc, 'page_content'):
+            content = f"[Document {idx}]\n{doc.page_content}"
+            formatted_parts.append(content)
+    
+    return "\n\n".join(formatted_parts)
+
+
+
+def extract_sources_from_documents(documents: List[Document]) -> List[Dict[str, str]]:
+    """
+    Extrait les informations de source de chaque document.
+    
+    Args:
+        documents: Liste de documents LangChain
+    
+    Returns:
+        Liste de dictionnaires avec les infos de source
+    """
+    sources = []
+    for idx, doc in enumerate(documents, start=1):
+        metadata = doc.metadata if hasattr(doc, 'metadata') else {}
+        source_info = {
+            "number": idx,
+            "source": metadata.get('source', 'Unknown source'),
+            "parent_doc_id": metadata.get('parent_doc_id', ''),
+            "chunk_id": metadata.get('chunk_id', ''),
+            "title": metadata.get('title', '') or metadata.get('source', '').split('/')[-1]
+        }
+        sources.append(source_info)
+    return sources
+
+
+def format_citations(response: str, sources: List[Dict[str, str]]) -> Tuple[str, str]:
+    """
+    Parse les citations dans la réponse et formate les références.
+    
+    Args:
+        response: Réponse générée avec citations [1], [2], etc.
+        sources: Liste des sources extraites des documents
+    
+    Returns:
+        Tuple (response_with_citations, references_section)
+    """
+    if not sources:
+        return response, ""
+    
+    # Extraire les numéros de citations utilisés (ex: [1], [2], [12])
+    citation_pattern = r'\[(\d+)\]'
+    citations_used = set()
+    
+    def replace_citation(match):
+        num = int(match.group(1))
+        if 1 <= num <= len(sources):
+            citations_used.add(num)
+            return f'[{num}]'
+        return match.group(0)
+    
+    # Remplacer les citations par des références formatées
+    response_formatted = re.sub(citation_pattern, replace_citation, response)
+    
+    # Créer la section des références
+    if citations_used:
+        references_parts = ["\n\n**Références:**"]
+        for num in sorted(citations_used):
+            source_info = sources[num - 1]  # -1 car les indices commencent à 0
+            source_display = source_info.get('title') or source_info.get('source', f'Document {num}')
+            references_parts.append(f"[{num}] {source_display}")
+        
+        references_section = "\n".join(references_parts)
+    else:
+        references_section = ""
+    
+    return response_formatted, references_section
 
 
 # GraphState definition
@@ -319,6 +409,32 @@ def retrieve(state: Dict) -> Dict:
             }
         
         print(f"[RETRIEVE] ✅ {len(documents)} documents trouves en {elapsed_time:.2f}s.")
+        
+        # Enregistrer les résultats de retrieval pour les métriques
+        retrieval_metrics_enabled = getattr(Config, 'RETRIEVAL_METRICS_ENABLED', True)
+        if retrieval_metrics_enabled:
+            try:
+                retrieval_collector = get_retrieval_metrics_collector()
+                # Extraire les IDs des documents récupérés
+                retrieved_doc_ids = []
+                retrieved_sources = []
+                for doc in documents:
+                    # Utiliser parent_doc_id si disponible, sinon chunk_id, sinon source
+                    doc_id = doc.metadata.get('parent_doc_id') or doc.metadata.get('chunk_id') or doc.metadata.get('source', 'unknown')
+                    retrieved_doc_ids.append(str(doc_id))
+                    source = doc.metadata.get('source', 'unknown')
+                    retrieved_sources.append(str(source))
+                
+                retrieval_collector.record_retrieval(
+                    conversation_id=conversation_id,
+                    query=state["question"],
+                    retrieved_doc_ids=retrieved_doc_ids,
+                    retrieved_sources=retrieved_sources
+                )
+            except Exception as e:
+                # Ne pas faire échouer le retrieval si l'enregistrement échoue
+                print(f"[WARNING] Erreur lors de l'enregistrement des métriques retrieval: {str(e)}")
+        
         logger.info(
             "Retrieval completed",
             extra={
@@ -358,7 +474,11 @@ def generate(state: Dict) -> Dict:
         if not state.get("documents"):
             raise GenerationException("Aucun document disponible pour la génération")
         
-        docs_txt = format_docs(state["documents"])
+        # Vérifier si les citations sont activées
+        citations_enabled = getattr(Config, 'CITATIONS_ENABLED', True)
+        
+        # Formater les documents (avec ou sans numéros de citation)
+        docs_txt = format_docs(state["documents"], with_citations=citations_enabled)
         rag_prompt_formatted = prompt["rag_prompt"].format(
             context=docs_txt, 
             question=state["question"]
@@ -372,6 +492,18 @@ def generate(state: Dict) -> Dict:
         if not generation:
             raise InvalidResponseException("Réponse vide du LLM")
         
+        # Extraire le contenu de la réponse
+        generation_content = generation.content if hasattr(generation, 'content') else str(generation)
+        
+        # Traiter les citations si activées
+        if citations_enabled:
+            sources = extract_sources_from_documents(state["documents"])
+            generation_content, references = format_citations(generation_content, sources)
+            
+            # Ajouter les références à la réponse si elles existent
+            if references:
+                generation_content = generation_content + references
+        
         elapsed_time = time.time() - start_time
         latencies["generation"] = elapsed_time
         
@@ -380,12 +512,12 @@ def generate(state: Dict) -> Dict:
             extra={
                 "component": "generation",
                 "conversation_id": conversation_id,
-                "data": {"latency": elapsed_time}
+                "data": {"latency": elapsed_time, "citations_enabled": citations_enabled}
             }
         )
         
         return {
-            "generation": generation,
+            "generation": generation_content,
             "loop_step": state.get("loop_step", 0) + 1,
             "latencies": latencies
         }
@@ -693,7 +825,7 @@ def grade_generation_v_documents_and_question(state: Dict) -> str:
         # Vérification des hallucinations
         try:
             hallucination_grader_prompt_formatted = prompt["hallucination_grader_prompt"].format(
-                documents=format_docs(state.get("documents", [])),
+                documents=format_docs(state.get("documents", []), with_citations=False),
                 generation=generation_content
             )
             
