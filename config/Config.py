@@ -1,11 +1,11 @@
 from dotenv import load_dotenv
 import os
 
-
-
-
 # Chargement des variables d'environnement
 load_dotenv()
+
+# Définir project_root pour les chemins
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
 class Config:
 
@@ -34,6 +34,15 @@ class Config:
     LLM_TIMEOUT = 30
     RETRIEVAL_TIMEOUT = 10
     WEB_SEARCH_TIMEOUT = 15
+
+        # Configuration des métriques
+    METRICS_ENABLED = True  # Activer/désactiver les métriques
+    METRICS_DIR = os.path.join(project_root, "data", "metrics")
+    LOGS_DIR = os.path.join(project_root, "data", "logs")
+    
+    # Seuils d'alerte (en secondes)
+    ALERT_LATENCY_THRESHOLD = 10.0  # Alerter si latence > 10s
+    ALERT_ERROR_RATE_THRESHOLD = 0.05  # Alerter si taux d'erreur > 5%
 
 
 # Global variables

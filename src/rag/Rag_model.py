@@ -1,6 +1,7 @@
 # Import necessary libraries
 import os 
 import sys
+import time
 from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -8,6 +9,10 @@ from langchain_community.tools.tavily_search.tool import TavilySearchResults
 from langgraph.graph import StateGraph, END
 from IPython.display import Image, display
 from langchain.schema import Document
+from typing import List, Annotated, Dict, Optional, Callable
+from typing_extensions import TypedDict
+import json
+import operator
 
 # Ajouter le répertoire racine du projet au sys.path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -17,11 +22,18 @@ if project_root not in sys.path:
 from config.Config import Config
 from src.rag.Prompts import get_prompts
 from src.rag.Data_processing import get_retriever
-import json
-import operator
-from typing import List, Annotated, Dict
-from typing_extensions import TypedDict
+from src.core.exceptions import (
+    RetrievalException, LLMAPIException, LLMTimeoutException,
+    LLMQuotaException, InvalidResponseException, MaxRetriesException,
+    WebSearchException, HallucinationDetectedException, ValidationException
+)
+import uuid
+from src.core.metrics import get_metrics_collector
+from src.core.logger import get_logger
 
+# Initialiser logger et metrics
+logger = get_logger()
+metrics = get_metrics_collector()
 # Load environment variables
 load_dotenv()
 
@@ -39,29 +51,105 @@ llm_json_mode = ChatGroq(
     groq_api_key=Config.GROQ_API_KEY
 )
 
-retriever = get_retriever()
+# Dans Rag_model.py, remplacez la ligne 48:
+# retriever = get_retriever()
+
+# Par une initialisation lazy:
+_retriever = None
+
+def get_retriever_instance():
+    """Récupère ou crée le retriever (lazy loading pour éviter blocage à l'import)."""
+    global _retriever
+    if _retriever is None:
+        print("[INIT] ⏳ Initialisation du retriever (première fois, peut prendre du temps)...")
+        try:
+            _retriever = get_retriever()
+            print("[INIT] ✅ Retriever créé.")
+            
+            # IMPORTANT: Précharger le modèle d'embedding pour éviter le blocage au premier appel
+            # Cela force le chargement du modèle en mémoire maintenant plutôt que lors du premier invoke
+            print("[INIT] ⏳ Préchargement du modèle d'embedding (peut prendre 10-30s)...")
+            try:
+                start_preload = time.time()
+                # Faire un appel test pour précharger le modèle
+                test_docs = _retriever.invoke("test preload")
+                preload_time = time.time() - start_preload
+                print(f"[INIT] ✅ Modèle préchargé avec succès en {preload_time:.2f}s")
+                print("[INIT] Le retriever est maintenant prêt à être utilisé sans blocage.")
+            except Exception as preload_error:
+                print(f"⚠️ [INIT] Attention: Échec du préchargement: {str(preload_error)}")
+                print("[INIT] Le retriever sera initialisé lors du premier appel réel.")
+                # On continue quand même, le retriever sera initialisé au premier appel
+                
+        except Exception as e:
+            print(f"❌ [INIT] Erreur lors de l'initialisation du retriever: {str(e)}")
+            raise
+    return _retriever
+
 web_search_tool = TavilySearchResults(k=3, tavily_api_key=Config.TAVILY_API_KEY)
 
 # Load prompts
 prompt = get_prompts()
 
+# Fonction helper pour retry avec backoff
+def retry_with_backoff(func: Callable, max_retries: int = None, 
+                      initial_delay: int = None) -> any:
+    """Retry une fonction avec backoff exponentiel."""
+    if max_retries is None:
+        max_retries = getattr(Config, 'MAX_RETRIES', 3)
+    if initial_delay is None:
+        initial_delay = getattr(Config, 'RETRY_INITIAL_DELAY', 1)
+    
+    backoff_factor = getattr(Config, 'RETRY_BACKOFF_FACTOR', 2)
+    
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except (LLMTimeoutException, LLMQuotaException, Exception) as e:
+            if attempt == max_retries - 1:
+                raise
+            delay = initial_delay * (backoff_factor ** attempt)
+            print(f"⚠️ Tentative {attempt + 1}/{max_retries} échouée. Retry dans {delay}s...")
+            time.sleep(delay)
+    raise MaxRetriesException(f"Échec après {max_retries} tentatives")
 
 
-
-def Rewrite_query(query: str):
+def Rewrite_query(query: str) -> str:
     """Rewrite the query to be more specific."""
-    print("---Rewrite the query---")
-    rewritting_prompt_formatted = prompt["Rewritting_prompt"].format(query=query)
-    generation = local_llm.invoke([HumanMessage(content=rewritting_prompt_formatted)])
-    # Extract the string if generation is a message object with a .content attribute
-    if hasattr(generation, "content"):
-        return generation.content
-    return generation  # or raise an error if it's not as expected
+    try:
+        print("---Rewrite the query---")
+        if not query or not query.strip():
+            return query
+        
+        rewritting_prompt_formatted = prompt["Rewritting_prompt"].format(query=query)
+        
+        def _call_llm():
+            return local_llm.invoke([HumanMessage(content=rewritting_prompt_formatted)])
+        
+        generation = retry_with_backoff(_call_llm)
+        
+        if hasattr(generation, "content"):
+            return generation.content
+        elif isinstance(generation, str):
+            return generation
+        else:
+            raise InvalidResponseException(
+                "Format de réponse invalide lors de la réécriture de la requête",
+                {"query": query, "response_type": type(generation).__name__}
+            )
+    except Exception as e:
+        # En cas d'erreur, retourner la query originale
+        print(f"⚠️ Erreur lors de la réécriture: {str(e)}. Utilisation de la requête originale.")
+        return query
 
 
 # Post-processing function for formatting documents
 def format_docs(docs):
-    return "\n\n".join(doc.page_content for doc in docs)
+    """Format documents for display."""
+    if not docs:
+        return ""
+    return "\n\n".join(doc.page_content for doc in docs if hasattr(doc, 'page_content'))
+
 
 # GraphState definition
 class GraphState(TypedDict):
@@ -72,101 +160,424 @@ class GraphState(TypedDict):
     answers: int
     loop_step: Annotated[int, operator.add]
     documents: List[str]
+    error_history: List[str]  # Nouveau : historique des erreurs
+    conversation_id: Optional[str]  # ID de conversation pour métriques
+    latencies: Optional[Dict[str, float]]  # Latences pour métriques
+
 
 # Node functions
 def retrieve(state: Dict) -> Dict:
     """Retrieve documents from the vector store."""
-    print("---RETRIEVE---")
-    documents = retriever.invoke(state["question"])
-    return {"documents": documents}
+    start_time = time.time()
+    conversation_id = state.get("conversation_id", "unknown")
+    latencies = state.get("latencies", {})
+    
+    try:
+        logger.info("Retrieval started", extra={"component": "retrieval", "conversation_id": conversation_id})
+        print("---RETRIEVE---")
+        if not state.get("question"):
+            raise RetrievalException("Question manquante pour la récupération")
+        
+        print(f"[RETRIEVE] Recherche de documents pour: {state['question'][:50]}...")
+        
+        # Obtenir le retriever (lazy loading)
+        print("[RETRIEVE] Obtention du retriever...")
+        current_retriever = get_retriever_instance()
+        print("[RETRIEVE] ✅ Retriever obtenu.")
+        
+        print("[RETRIEVE] Appel retriever.invoke()...")
+        print("[RETRIEVE] Cette etape va:")
+        print("[RETRIEVE]   1. Generer l'embedding de la question")
+        print("[RETRIEVE]   2. Rechercher dans ChromaDB")
+        print("[RETRIEVE] ⏳ Veuillez patienter...")
+        
+        # IMPORTANT: LangGraph exécute les nœuds directement, sans threading supplémentaire
+        # Le threading peut causer des conflits avec le runtime de LangGraph
+        # Appel direct: si ça bloque, c'est que le problème vient de NomicEmbeddings/ChromaDB
+        try:
+            print("[RETRIEVE] ⏳ Debut de retriever.invoke()...")
+            documents = current_retriever.invoke(state["question"])
+            elapsed_time = time.time() - start_time
+            latencies["retrieval"] = elapsed_time
+            print(f"[RETRIEVE] ✅ retriever.invoke() termine avec succes en {elapsed_time:.2f}s")
+        except Exception as e:
+            elapsed_time = time.time() - start_time
+            latencies["retrieval"] = elapsed_time
+            print(f"[RETRIEVE] ❌ Exception apres {elapsed_time:.2f}s: {type(e).__name__}: {str(e)}")
+            import traceback
+            print("[RETRIEVE] Stack trace complete:")
+            traceback.print_exc()
+            raise RetrievalException(f"Erreur lors de l'invocation du retriever: {str(e)}") from e
+        
+        if documents is None:
+            print("❌ [RETRIEVE] Aucun resultat retourne (None)")
+            raise RetrievalException("Aucun resultat retourne par le retriever")
+        
+        if not documents or len(documents) == 0:
+            print("⚠️ [RETRIEVE] Aucun document trouve")
+            logger.warning(
+                "No documents found",
+                extra={"component": "retrieval", "conversation_id": conversation_id}
+            )
+            return {
+                "documents": [],
+                "error_history": state.get("error_history", []) + ["Aucun document trouve"],
+                "latencies": latencies
+            }
+        
+        print(f"[RETRIEVE] ✅ {len(documents)} documents trouves en {elapsed_time:.2f}s.")
+        logger.info(
+            "Retrieval completed",
+            extra={
+                "component": "retrieval",
+                "conversation_id": conversation_id,
+                "data": {"latency": elapsed_time, "num_documents": len(documents)}
+            }
+        )
+        return {"documents": documents, "latencies": latencies}
+        
+    except RetrievalException:
+        raise
+    except Exception as e:
+        elapsed_time = time.time() - start_time
+        latencies["retrieval"] = elapsed_time
+        print(f"❌ [RETRIEVE] Exception non capturee: {str(e)}")
+        logger.error(
+            "Retrieval failed",
+            extra={"component": "retrieval", "conversation_id": conversation_id},
+            exc_info=True
+        )
+        import traceback
+        traceback.print_exc()
+        raise RetrievalException(f"Erreur recuperation: {str(e)}") from e
+
 
 def generate(state: Dict) -> Dict:
     """Generate an answer using RAG on the retrieved documents."""
-    print("---GENERATE---")
-    docs_txt = format_docs(state["documents"])
-    rag_prompt_formatted = prompt["rag_prompt"].format(context=docs_txt, question=state["question"])
-    generation = local_llm.invoke([HumanMessage(content=rag_prompt_formatted)])
-    return {"generation": generation, "loop_step": state.get("loop_step", 0) + 1}
+    start_time = time.time()
+    conversation_id = state.get("conversation_id", "unknown")
+    latencies = state.get("latencies", {})
+    
+    try:
+        logger.info("Generation started", extra={"component": "generation", "conversation_id": conversation_id})
+        print("---GENERATE---")
+        
+        if not state.get("documents"):
+            raise GenerationException("Aucun document disponible pour la génération")
+        
+        docs_txt = format_docs(state["documents"])
+        rag_prompt_formatted = prompt["rag_prompt"].format(
+            context=docs_txt, 
+            question=state["question"]
+        )
+        
+        def _generate():
+            return local_llm.invoke([HumanMessage(content=rag_prompt_formatted)])
+        
+        generation = retry_with_backoff(_generate)
+        
+        if not generation:
+            raise InvalidResponseException("Réponse vide du LLM")
+        
+        elapsed_time = time.time() - start_time
+        latencies["generation"] = elapsed_time
+        
+        logger.info(
+            "Generation completed",
+            extra={
+                "component": "generation",
+                "conversation_id": conversation_id,
+                "data": {"latency": elapsed_time}
+            }
+        )
+        
+        return {
+            "generation": generation,
+            "loop_step": state.get("loop_step", 0) + 1,
+            "latencies": latencies
+        }
+    except LLMQuotaException as e:
+        elapsed_time = time.time() - start_time
+        latencies["generation"] = elapsed_time
+        raise LLMQuotaException(
+            "Quota API dépassé. Veuillez réessayer plus tard.",
+            {"loop_step": state.get("loop_step", 0)}
+        ) from e
+    except Exception as e:
+        elapsed_time = time.time() - start_time
+        latencies["generation"] = elapsed_time
+        error_msg = f"Erreur lors de la génération: {str(e)}"
+        print(f"❌ {error_msg}")
+        logger.error(
+            "Generation failed",
+            extra={"component": "generation", "conversation_id": conversation_id},
+            exc_info=True
+        )
+        from src.core.exceptions import GenerationException
+        raise GenerationException(error_msg) from e
+
 
 def grade_documents(state: Dict) -> Dict:
     """Grade the relevance of retrieved documents."""
-    print("---CHECK DOCUMENT RELEVANCE TO QUESTION---")
-    filtered_docs = []
-    web_search = "No"
-    for doc in state["documents"]:
-        doc_grader_prompt_formatted = prompt["doc_grader_prompt"].format(document=doc.page_content, question=state["question"])
-        result = llm_json_mode.invoke(
-            [SystemMessage(content=prompt["doc_grader_instructions"])] +
-            [HumanMessage(content=doc_grader_prompt_formatted)]
+    start_time = time.time()
+    conversation_id = state.get("conversation_id", "unknown")
+    latencies = state.get("latencies", {})
+    
+    try:
+        logger.info("Document grading started", extra={"component": "grading", "conversation_id": conversation_id})
+        print("---CHECK DOCUMENT RELEVANCE TO QUESTION---")
+        filtered_docs = []
+        web_search = "No"
+        
+        if not state.get("documents"):
+            elapsed_time = time.time() - start_time
+            latencies["grading"] = elapsed_time
+            return {"documents": [], "web_search": "Yes", "latencies": latencies}
+        
+        for doc in state["documents"]:
+            try:
+                doc_grader_prompt_formatted = prompt["doc_grader_prompt"].format(
+                    document=doc.page_content, 
+                    question=state["question"]
+                )
+                
+                def _grade():
+                    return llm_json_mode.invoke(
+                        [SystemMessage(content=prompt["doc_grader_instructions"])] +
+                        [HumanMessage(content=doc_grader_prompt_formatted)]
+                    )
+                
+                result = retry_with_backoff(_grade)
+                
+                # Parse JSON avec gestion d'erreur
+                try:
+                    grade_data = json.loads(result.content)
+                    grade = grade_data.get("binary_score", "no")
+                except json.JSONDecodeError as e:
+                    print(f"⚠️ Erreur parsing JSON: {str(e)}. Score par défaut: no")
+                    grade = "no"
+                
+                if grade.lower() == "yes":
+                    print("---GRADE: DOCUMENT RELEVANT---")
+                    filtered_docs.append(doc)
+                else:
+                    print("---GRADE: DOCUMENT NOT RELEVANT---")
+                    web_search = "Yes"
+            except Exception as e:
+                print(f"⚠️ Erreur lors du grading d'un document: {str(e)}. Document ignoré.")
+                web_search = "Yes"
+                continue
+        
+        elapsed_time = time.time() - start_time
+        latencies["grading"] = elapsed_time
+        
+        logger.info(
+            "Document grading completed",
+            extra={
+                "component": "grading",
+                "conversation_id": conversation_id,
+                "data": {"latency": elapsed_time, "num_filtered": len(filtered_docs)}
+            }
         )
-        grade = json.loads(result.content)["binary_score"]
-        if grade.lower() == "yes":
-            print("---GRADE: DOCUMENT RELEVANT---")
-            filtered_docs.append(doc)
-        else:
-            print("---GRADE: DOCUMENT NOT RELEVANT---")
-            web_search = "Yes"
-    return {"documents": filtered_docs, "web_search": web_search}
+        
+        return {"documents": filtered_docs, "web_search": web_search, "latencies": latencies}
+    except Exception as e:
+        elapsed_time = time.time() - start_time
+        latencies["grading"] = elapsed_time
+        print(f"❌ Erreur dans grade_documents: {str(e)}")
+        logger.error(
+            "Document grading failed",
+            extra={"component": "grading", "conversation_id": conversation_id},
+            exc_info=True
+        )
+        # En cas d'erreur, on continue avec tous les documents
+        return {"documents": state.get("documents", []), "web_search": "Yes", "latencies": latencies}
+
 
 def web_search(state: Dict) -> Dict:
     """Perform a web search based on the question."""
-    print("---WEB SEARCH---")
-    docs = web_search_tool.invoke({"query": state["question"]})
-    web_results = "\n".join([d["content"] for d in docs])
-    documents = state.get("documents", [])
-    documents.append(Document(page_content=web_results))
-    return {"documents": documents}
+    start_time = time.time()
+    conversation_id = state.get("conversation_id", "unknown")
+    latencies = state.get("latencies", {})
+    
+    try:
+        logger.info("Web search started", extra={"component": "web_search", "conversation_id": conversation_id})
+        print("---WEB SEARCH---")
+        
+        if not state.get("question"):
+            raise WebSearchException("Question manquante pour la recherche web")
+        
+        def _search():
+            return web_search_tool.invoke({"query": state["question"]})
+        
+        docs = retry_with_backoff(_search, max_retries=2)
+        
+        if not docs:
+            print("⚠️ Aucun résultat de recherche web")
+            elapsed_time = time.time() - start_time
+            latencies["web_search"] = elapsed_time
+            return {"documents": state.get("documents", []), "latencies": latencies}
+        
+        web_results = "\n".join([d.get("content", "") for d in docs if d.get("content")])
+        
+        if not web_results:
+            print("⚠️ Résultats web vides")
+            elapsed_time = time.time() - start_time
+            latencies["web_search"] = elapsed_time
+            return {"documents": state.get("documents", []), "latencies": latencies}
+        
+        documents = state.get("documents", [])
+        documents.append(Document(page_content=web_results))
+        
+        elapsed_time = time.time() - start_time
+        latencies["web_search"] = elapsed_time
+        
+        logger.info(
+            "Web search completed",
+            extra={
+                "component": "web_search",
+                "conversation_id": conversation_id,
+                "data": {"latency": elapsed_time}
+            }
+        )
+        
+        return {"documents": documents, "latencies": latencies}
+    except Exception as e:
+        elapsed_time = time.time() - start_time
+        latencies["web_search"] = elapsed_time
+        error_msg = f"Erreur lors de la recherche web: {str(e)}"
+        print(f"❌ {error_msg}")
+        logger.error(
+            "Web search failed",
+            extra={"component": "web_search", "conversation_id": conversation_id},
+            exc_info=True
+        )
+        # Ne pas bloquer, continuer avec les documents existants
+        return {"documents": state.get("documents", []), "latencies": latencies}
+
 
 # Edge functions
 def route_question(state: Dict) -> str:
     """Route the question to either web search or RAG based on LLM decision."""
-    print("---ROUTE QUESTION---")
-    route_question = llm_json_mode.invoke(
-        [SystemMessage(content=prompt["router_instructions"])] +
-        [HumanMessage(content=state["question"])]
-    )
-    source = json.loads(route_question.content)["datasource"]
-    return "websearch" if source == "websearch" else "vectorstore"
+    try:
+        print("---ROUTE QUESTION---")
+        
+        def _route():
+            return llm_json_mode.invoke(
+                [SystemMessage(content=prompt["router_instructions"])] +
+                [HumanMessage(content=state["question"])]
+            )
+        
+        route_result = retry_with_backoff(_route)
+        
+        try:
+            route_data = json.loads(route_result.content)
+            source = route_data.get("datasource", "vectorstore")
+        except json.JSONDecodeError:
+            print("⚠️ Erreur parsing JSON routing. Défaut: vectorstore")
+            source = "vectorstore"
+        
+        return "websearch" if source == "websearch" else "vectorstore"
+    except Exception as e:
+        print(f"⚠️ Erreur lors du routing: {str(e)}. Défaut: vectorstore")
+        return "vectorstore"  # Fallback sur vectorstore
+
 
 def decide_to_generate(state: Dict) -> str:
     """Decide whether to generate an answer or add web search."""
     print("---ASSESS GRADED DOCUMENTS---")
-    if state["web_search"] == "Yes":
+    if state.get("web_search") == "Yes":
         print("---DECISION: INCLUDE WEB SEARCH---")
         return "websearch"
     else:
         print("---DECISION: GENERATE---")
         return "generate"
 
+
 def grade_generation_v_documents_and_question(state: Dict) -> str:
     """Grade whether the generation is grounded in the document and answers the question."""
-    print("---CHECK HALLUCINATIONS---")
-    hallucination_grader_prompt_formatted = prompt["hallucination_grader_prompt"].format(
-        documents=format_docs(state["documents"]), generation=state["generation"].content
-    )
-    result = llm_json_mode.invoke(
-        [SystemMessage(content=prompt["hallucination_grader_instructions"])] +
-        [HumanMessage(content=hallucination_grader_prompt_formatted)]
-    )
-    grade = json.loads(result.content)["binary_score"]
-
-    if grade == "yes":
+    try:
+        print("---CHECK HALLUCINATIONS---")
+        
+        max_retries = state.get("max_retries", getattr(Config, 'MAX_RETRIES', 3))
+        loop_step = state.get("loop_step", 0)
+        
+        if not state.get("generation"):
+            raise ValidationException("Génération manquante pour la validation")
+        
+        generation_content = state["generation"].content if hasattr(state["generation"], "content") else str(state["generation"])
+        
+        # Vérification des hallucinations
+        try:
+            hallucination_grader_prompt_formatted = prompt["hallucination_grader_prompt"].format(
+                documents=format_docs(state.get("documents", [])),
+                generation=generation_content
+            )
+            
+            def _check_hallucination():
+                return llm_json_mode.invoke(
+                    [SystemMessage(content=prompt["hallucination_grader_instructions"])] +
+                    [HumanMessage(content=hallucination_grader_prompt_formatted)]
+                )
+            
+            result = retry_with_backoff(_check_hallucination)
+            
+            try:
+                grade_data = json.loads(result.content)
+                grade = grade_data.get("binary_score", "no")
+            except json.JSONDecodeError:
+                print("⚠️ Erreur parsing JSON hallucination. Par défaut: no")
+                grade = "no"
+            
+            if grade != "yes":
+                if loop_step < max_retries:
+                    print(f"---DECISION: GENERATION NOT GROUNDED, RETRYING ({loop_step + 1}/{max_retries})---")
+                    return "not supported"
+                else:
+                    print("---DECISION: MAX RETRIES REACHED---")
+                    raise MaxRetriesException(
+                        f"Maximum de {max_retries} tentatives atteint",
+                        {"loop_step": loop_step, "max_retries": max_retries}
+                    )
+        except MaxRetriesException:
+            raise
+        except Exception as e:
+            print(f"⚠️ Erreur vérification hallucination: {str(e)}. On continue...")
+            # En cas d'erreur, on considère comme OK pour éviter boucle infinie
+        
+        # Vérification de l'utilité
         print("---DECISION: GENERATION IS GROUNDED IN DOCUMENTS---")
-        answer_grader_prompt_formatted = prompt["answer_grader_prompt"].format(
-            question=state["question"], generation=state["generation"].content
-        )
-        result = llm_json_mode.invoke(
-            [SystemMessage(content=prompt["answer_grader_instructions"])] +
-            [HumanMessage(content=answer_grader_prompt_formatted)]
-        )
-        grade = json.loads(result.content)["binary_score"]
-        return "useful" if grade == "yes" else "not useful"
-    elif state["loop_step"] <= state["max_retries"]:
-        print("---DECISION: GENERATION IS NOT GROUNDED, RETRYING---")
-        return "not supported"
-    else:
-        print("---DECISION: MAX RETRIES REACHED---")
+        try:
+            answer_grader_prompt_formatted = prompt["answer_grader_prompt"].format(
+                question=state["question"],
+                generation=generation_content
+            )
+            
+            def _check_useful():
+                return llm_json_mode.invoke(
+                    [SystemMessage(content=prompt["answer_grader_instructions"])] +
+                    [HumanMessage(content=answer_grader_prompt_formatted)]
+                )
+            
+            result = retry_with_backoff(_check_useful)
+            
+            try:
+                grade_data = json.loads(result.content)
+                grade = grade_data.get("binary_score", "no")
+            except json.JSONDecodeError:
+                print("⚠️ Erreur parsing JSON answer. Par défaut: no")
+                grade = "no"
+            
+            return "useful" if grade == "yes" else "not useful"
+        except Exception as e:
+            print(f"⚠️ Erreur vérification utilité: {str(e)}. Par défaut: not useful")
+            return "not useful"
+    except MaxRetriesException:
         return "max retries"
+    except Exception as e:
+        print(f"❌ Erreur dans grade_generation: {str(e)}")
+        return "max retries"  # Sécurité: arrêt en cas d'erreur
+
 
 # Workflow definition and graph compilation
 workflow = StateGraph(GraphState)
@@ -197,12 +608,210 @@ graph = workflow.compile()
 
 # Final response function
 def get_final_response(query: str) -> str:
-    """Run the workflow and return the final generated response."""
-    query=Rewrite_query(query)
-    initial_state = GraphState(question=query)
-    final_state = graph.invoke(initial_state)
-    #return final_state.get("generation", {}).get("content", "No response generated.")
-    generation = final_state.get("generation")
-    if generation and hasattr(generation, "content"):
-        return generation.content
-    return "No response generated."
+    """Point d'entrée principal pour obtenir une réponse RAG."""
+    conversation_id = str(uuid.uuid4())
+    trace_id = str(uuid.uuid4())
+    
+    # Début de la mesure end-to-end
+    start_time = time.time()
+    latencies = {}
+    
+    try:
+        logger.info(
+            "Request started",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id,
+                "data": {"query": query[:100]}
+            }
+        )
+        
+        if not query or not query.strip():
+            return "⚠️ Veuillez fournir une question valide."
+        
+        # Réécriture de la requête (avec fallback sur query originale)
+        try:
+            rewritten_query = Rewrite_query(query)
+        except Exception as e:
+            print(f"⚠️ Erreur réécriture, utilisation query originale: {str(e)}")
+            rewritten_query = query
+        
+        # Initialisation de l'état avec max_retries, conversation_id et latencies
+        max_retries = getattr(Config, 'MAX_RETRIES', 3)
+        initial_state = GraphState(
+            question=rewritten_query,
+            generation="",
+            web_search="No",
+            max_retries=max_retries,
+            answers=0,
+            loop_step=0,
+            documents=[],
+            error_history=[],
+            conversation_id=conversation_id,
+            latencies=latencies
+        )
+        
+        # Exécution du workflow
+        final_state = graph.invoke(initial_state)
+        
+        # Récupérer les latences mises à jour depuis le state
+        latencies = final_state.get("latencies", latencies)
+        
+        # Extraction de la réponse
+        generation = final_state.get("generation")
+        if generation and hasattr(generation, "content"):
+            response = generation.content
+        elif generation:
+            response = str(generation)
+        else:
+            response = "⚠️ Aucune réponse générée. Veuillez reformuler votre question."
+        
+        # Mesurer latence end-to-end
+        latencies["end_to_end"] = time.time() - start_time
+        
+        # Enregistrer les métriques
+        if getattr(Config, 'METRICS_ENABLED', True):
+            metrics.record_request(
+                conversation_id=conversation_id,
+                query=query,
+                latencies=latencies,
+                success=True,
+                num_documents=len(final_state.get("documents", [])),
+                response_length=len(response) if response else 0
+            )
+        
+        logger.info(
+            "Request completed",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id,
+                "data": {"latency": latencies["end_to_end"]}
+            }
+        )
+        
+        return response
+        
+    except MaxRetriesException as e:
+        latencies["end_to_end"] = time.time() - start_time
+        error_msg = "⚠️ Désolé, j'ai atteint le nombre maximum de tentatives. Veuillez reformuler votre question ou réessayer plus tard."
+        
+        if getattr(Config, 'METRICS_ENABLED', True):
+            metrics.record_request(
+                conversation_id=conversation_id,
+                query=query,
+                latencies=latencies,
+                success=False,
+                error="MaxRetriesException"
+            )
+        
+        logger.warning(
+            "Request max retries",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id
+            }
+        )
+        
+        return error_msg
+    
+    except LLMQuotaException as e:
+        latencies["end_to_end"] = time.time() - start_time
+        error_msg = "⚠️ Le service est temporairement saturé. Veuillez réessayer dans quelques instants."
+        
+        if getattr(Config, 'METRICS_ENABLED', True):
+            metrics.record_request(
+                conversation_id=conversation_id,
+                query=query,
+                latencies=latencies,
+                success=False,
+                error="LLMQuotaException"
+            )
+        
+        logger.error(
+            "Request quota exceeded",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id
+            }
+        )
+        
+        return error_msg
+    
+    except RetrievalException as e:
+        latencies["end_to_end"] = time.time() - start_time
+        error_msg = "⚠️ Impossible de trouver des documents pertinents. Veuillez reformuler votre question."
+        
+        if getattr(Config, 'METRICS_ENABLED', True):
+            metrics.record_request(
+                conversation_id=conversation_id,
+                query=query,
+                latencies=latencies,
+                success=False,
+                error="RetrievalException"
+            )
+        
+        logger.error(
+            "Request retrieval failed",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id
+            }
+        )
+        
+        return error_msg
+    
+    except WebSearchException as e:
+        latencies["end_to_end"] = time.time() - start_time
+        error_msg = "⚠️ Erreur lors de la recherche web. Veuillez réessayer."
+        
+        if getattr(Config, 'METRICS_ENABLED', True):
+            metrics.record_request(
+                conversation_id=conversation_id,
+                query=query,
+                latencies=latencies,
+                success=False,
+                error="WebSearchException"
+            )
+        
+        logger.error(
+            "Request web search failed",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id
+            }
+        )
+        
+        return error_msg
+        
+    except Exception as e:
+        latencies["end_to_end"] = time.time() - start_time
+        error_msg = str(e)
+        
+        # Enregistrer l'erreur
+        if getattr(Config, 'METRICS_ENABLED', True):
+            metrics.record_request(
+                conversation_id=conversation_id,
+                query=query,
+                latencies=latencies,
+                success=False,
+                error=error_msg
+            )
+        
+        logger.error(
+            "Request failed",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id,
+                "data": {"error": error_msg}
+            },
+            exc_info=True
+        )
+        
+        raise
