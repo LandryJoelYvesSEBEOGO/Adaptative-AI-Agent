@@ -44,6 +44,11 @@ class Config:
     ALERT_LATENCY_THRESHOLD = 10.0  # Alerter si latence > 10s
     ALERT_ERROR_RATE_THRESHOLD = 0.05  # Alerter si taux d'erreur > 5%
 
+        # Configuration Hybrid Search
+    HYBRID_SEARCH_ENABLED = True  # Activer/désactiver hybrid search
+    VECTOR_SEARCH_WEIGHT = 0.7  # Poids pour recherche vectorielle (70%)
+    BM25_SEARCH_WEIGHT = 0.3  # Poids pour recherche BM25 (30%)
+
 
 # Global variables
 class SPEAKER_TYPES:

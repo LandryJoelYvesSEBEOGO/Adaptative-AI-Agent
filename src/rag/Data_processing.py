@@ -1,5 +1,6 @@
 import os
 import sys
+import pickle
 from langchain_community.document_loaders import WebBaseLoader, PyPDFLoader
 from langchain_community.vectorstores import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -28,6 +29,9 @@ urls = [
 # Répertoire pour ChromaDB (chemin absolu basé sur le répertoire racine du projet)
 CHROMA_DB_DIR = os.path.join(project_root, "data", "chroma_db")
 
+# Cache pour les documents BM25
+BM25_DOCS_CACHE = os.path.join(project_root, "data", "bm25_docs_cache.pkl")
+
 
 def load_web_documents(urls: List[str]):
     """Charge les documents à partir d'URLs."""
@@ -45,6 +49,28 @@ def split_documents(docs_list: List, chunk_size: int = 1000, chunk_overlap: int 
         chunk_size=chunk_size, chunk_overlap=chunk_overlap
     )
     return text_splitter.split_documents(docs_list)
+
+
+def _save_bm25_documents(doc_splits):
+    """Sauvegarde les documents pour BM25 dans un fichier cache."""
+    try:
+        os.makedirs(os.path.dirname(BM25_DOCS_CACHE), exist_ok=True)
+        with open(BM25_DOCS_CACHE, 'wb') as f:
+            pickle.dump(doc_splits, f)
+        print("[INFO] Documents sauvegardes pour BM25 cache")
+    except Exception as e:
+        print(f"[WARNING] Impossible de sauvegarder BM25 cache: {str(e)}")
+
+
+def _load_bm25_documents():
+    """Charge les documents pour BM25 depuis le cache."""
+    try:
+        if os.path.exists(BM25_DOCS_CACHE):
+            with open(BM25_DOCS_CACHE, 'rb') as f:
+                return pickle.load(f)
+    except Exception as e:
+        print(f"[WARNING] Impossible de charger BM25 cache: {str(e)}")
+    return None
 
 
 
@@ -102,8 +128,21 @@ def load_pdf_documents_from_folder(folder_path: str):
 
     return load_pdf_documents(pdf_paths)
 
-def get_retriever(k: int = 3):
-    """Crée un retriever pour récupérer les documents les plus pertinents."""
+def get_retriever(k: int = 3, use_hybrid: bool = None):
+    """
+    Crée un retriever pour récupérer les documents les plus pertinents.
+    
+    Args:
+        k: Nombre de documents à retourner
+        use_hybrid: Si True, utilise hybrid search (vector + BM25). 
+                    Si None, utilise la config HYBRID_SEARCH_ENABLED
+    """
+    from langchain.retrievers import EnsembleRetriever
+    from langchain_community.retrievers import BM25Retriever
+    
+    # Utiliser la config si use_hybrid n'est pas spécifié
+    if use_hybrid is None:
+        use_hybrid = getattr(Config, 'HYBRID_SEARCH_ENABLED', True)
     
     # Répertoire pour ChromaDB
     chroma_db_path = CHROMA_DB_DIR
@@ -114,7 +153,7 @@ def get_retriever(k: int = 3):
         print("[INFO] ChromaDB existe. Chargement du retriever uniquement...")
         
         # Détection intelligente du device
-        device = "cpu"  # Par défaut CPU
+        device = "cpu"
         try:
             import torch
             if torch.cuda.is_available():
@@ -122,7 +161,6 @@ def get_retriever(k: int = 3):
                 print(f"[INFO] CUDA detecte: {torch.cuda.get_device_name(0)}")
             else:
                 print("[INFO] CUDA non disponible, utilisation du CPU")
-                print("[INFO] Pour utiliser GPU, installez PyTorch avec CUDA: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121")
         except ImportError:
             print("[INFO] PyTorch non disponible, utilisation du CPU")
         except Exception as e:
@@ -131,11 +169,66 @@ def get_retriever(k: int = 3):
         embedding_model = NomicEmbeddings(
             model=Config.NomicEmbeddings_model, 
             inference_mode="local", 
-            device=device  # Détection automatique
+            device=device
         )
         vectorstore = Chroma(persist_directory=chroma_db_path, embedding_function=embedding_model)
-        print(f"[INFO] Retriever charge depuis ChromaDB existante (device: {device}).")
-        return vectorstore.as_retriever(search_kwargs={"k": k})
+        print(f"[INFO] Vectorstore charge depuis ChromaDB existante (device: {device}).")
+        
+        # Créer le retriever vectoriel
+        vector_retriever = vectorstore.as_retriever(search_kwargs={"k": k})
+        
+        # Si hybrid search est activé, créer ensemble retriever
+        if use_hybrid:
+            print("[INFO] Activation du Hybrid Search (Vector + BM25)...")
+            
+            # Essayer d'abord de charger depuis le cache pickle
+            bm25_documents = _load_bm25_documents()
+            
+            if bm25_documents:
+                print("[INFO] Documents BM25 charges depuis le cache")
+            else:
+                # Fallback: essayer de charger depuis ChromaDB
+                print("[INFO] Cache BM25 non trouve, tentative de chargement depuis ChromaDB...")
+                try:
+                    all_docs = vectorstore.get()
+                    if all_docs and 'documents' in all_docs and len(all_docs['documents']) > 0:
+                        # Créer des Document objects à partir des données ChromaDB
+                        from langchain.schema import Document
+                        bm25_documents = []
+                        for i, doc_text in enumerate(all_docs['documents']):
+                            metadata = all_docs.get('metadatas', [{}])[i] if 'metadatas' in all_docs else {}
+                            bm25_documents.append(Document(page_content=doc_text, metadata=metadata))
+                        print("[INFO] Documents BM25 charges depuis ChromaDB")
+                    else:
+                        raise ValueError("Pas de documents dans ChromaDB")
+                except Exception as e:
+                    print(f"[WARNING] Impossible de charger les documents pour BM25: {str(e)}")
+                    print("[INFO] Utilisation du retriever vectoriel uniquement")
+                    return vector_retriever
+            
+            # Créer le retriever BM25 avec les documents chargés
+            try:
+                bm25_retriever = BM25Retriever.from_documents(bm25_documents)
+                bm25_retriever.k = k
+                
+                # Créer l'ensemble retriever avec poids
+                vector_weight = getattr(Config, 'VECTOR_SEARCH_WEIGHT', 0.7)
+                bm25_weight = getattr(Config, 'BM25_SEARCH_WEIGHT', 0.3)
+                
+                ensemble_retriever = EnsembleRetriever(
+                    retrievers=[vector_retriever, bm25_retriever],
+                    weights=[vector_weight, bm25_weight]
+                )
+                
+                print(f"[INFO] Hybrid Search configure (Vector: {vector_weight*100}%, BM25: {bm25_weight*100}%)")
+                return ensemble_retriever
+            except Exception as e:
+                print(f"[WARNING] Erreur lors de la creation du retriever BM25: {str(e)}")
+                print("[INFO] Utilisation du retriever vectoriel uniquement")
+                return vector_retriever
+        else:
+            print("[INFO] Hybrid Search desactive, utilisation du retriever vectoriel uniquement")
+            return vector_retriever
     
     # Si ChromaDB n'existe pas, charger et indexer les documents
     print("[INFO] ChromaDB n'existe pas. Chargement des documents...")
@@ -149,7 +242,7 @@ def get_retriever(k: int = 3):
     except Exception as e:
         print(f"⚠️ Erreur lors du chargement des documents web: {str(e)}")
         web_docs = []
-
+    
     # Charger automatiquement tous les PDFs du dossier "data/raw"
     raw_data_folder = os.path.join(project_root, "data", "raw")
     pdf_docs = []
@@ -178,8 +271,38 @@ def get_retriever(k: int = 3):
     vectorstore = get_or_create_chroma_db(doc_splits, CHROMA_DB_DIR, clear_db=False)
     print("[INFO] ChromaDB créée avec succès.")
     
-    # Retourner le retriever
-    return vectorstore.as_retriever(search_kwargs={"k": k})
+    # Sauvegarder les documents pour BM25 cache
+    _save_bm25_documents(doc_splits)
+    
+    # Créer le retriever vectoriel
+    vector_retriever = vectorstore.as_retriever(search_kwargs={"k": k})
+    
+    # Si hybrid search est activé, créer ensemble retriever
+    if use_hybrid:
+        print("[INFO] Activation du Hybrid Search (Vector + BM25)...")
+        try:
+            # Créer le retriever BM25 avec les documents splits
+            bm25_retriever = BM25Retriever.from_documents(doc_splits)
+            bm25_retriever.k = k
+            
+            # Créer l'ensemble retriever avec poids
+            vector_weight = getattr(Config, 'VECTOR_SEARCH_WEIGHT', 0.7)
+            bm25_weight = getattr(Config, 'BM25_SEARCH_WEIGHT', 0.3)
+            
+            ensemble_retriever = EnsembleRetriever(
+                retrievers=[vector_retriever, bm25_retriever],
+                weights=[vector_weight, bm25_weight]
+            )
+            
+            print(f"[INFO] Hybrid Search configure (Vector: {vector_weight*100}%, BM25: {bm25_weight*100}%)")
+            return ensemble_retriever
+        except Exception as e:
+            print(f"[WARNING] Erreur lors de la creation du retriever BM25: {str(e)}")
+            print("[INFO] Utilisation du retriever vectoriel uniquement")
+            return vector_retriever
+    else:
+        print("[INFO] Hybrid Search desactive, utilisation du retriever vectoriel uniquement")
+        return vector_retriever
 
 
 if __name__ == "__main__":
