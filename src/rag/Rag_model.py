@@ -11,6 +11,7 @@ from IPython.display import Image, display
 from langchain.schema import Document
 from typing import List, Annotated, Dict, Optional, Callable
 from typing_extensions import TypedDict
+from sentence_transformers import CrossEncoder
 import json
 import operator
 
@@ -63,8 +64,16 @@ def get_retriever_instance():
     if _retriever is None:
         print("[INIT] ⏳ Initialisation du retriever (première fois, peut prendre du temps)...")
         try:
-            _retriever = get_retriever()
-            print("[INIT] ✅ Retriever créé.")
+            # Si reranker activé, récupérer plus de documents pour le reranking
+            reranker_enabled = getattr(Config, 'RERANKER_ENABLED', True)
+            if reranker_enabled:
+                reranker_top_k = getattr(Config, 'RERANKER_TOP_K', 20)
+                _retriever = get_retriever(k=reranker_top_k)
+                print(f"[INIT] ✅ Retriever créé avec k={reranker_top_k} (pour reranking).")
+            else:
+                final_k = getattr(Config, 'RERANKER_FINAL_K', 3)
+                _retriever = get_retriever(k=final_k)
+                print(f"[INIT] ✅ Retriever créé avec k={final_k}.")
             
             # IMPORTANT: Précharger le modèle d'embedding pour éviter le blocage au premier appel
             # Cela force le chargement du modèle en mémoire maintenant plutôt que lors du premier invoke
@@ -164,7 +173,73 @@ class GraphState(TypedDict):
     conversation_id: Optional[str]  # ID de conversation pour métriques
     latencies: Optional[Dict[str, float]]  # Latences pour métriques
 
+# Reranker global (lazy loading)
+_reranker = None
 
+def get_reranker_instance():
+    """Récupère ou crée le reranker cross-encoder (lazy loading)."""
+    global _reranker
+    if _reranker is None:
+        reranker_enabled = getattr(Config, 'RERANKER_ENABLED', True)
+        if not reranker_enabled:
+            return None
+        
+        reranker_model = getattr(Config, 'RERANKER_MODEL', 'cross-encoder/ms-marco-MiniLM-L-6-v2')
+        print(f"[RERANKER] ⏳ Initialisation du reranker: {reranker_model}...")
+        try:
+            _reranker = CrossEncoder(reranker_model)
+            print("[RERANKER] ✅ Reranker initialisé avec succès")
+        except Exception as e:
+            print(f"[RERANKER] ❌ Erreur lors de l'initialisation: {str(e)}")
+            print("[RERANKER] Le reranking sera désactivé pour cette session")
+            return None
+    return _reranker
+
+def rerank_documents(query: str, documents: List[Document], top_k: int = None) -> List[Document]:
+    """
+    Rerank les documents avec un cross-encoder.
+    
+    Args:
+        query: La question de l'utilisateur
+        documents: Liste de documents à reranker
+        top_k: Nombre de documents à retourner après reranking
+    
+    Returns:
+        Liste de documents rerankés (top_k premiers)
+    """
+    if not documents or len(documents) == 0:
+        return documents
+    
+    reranker = get_reranker_instance()
+    if reranker is None:
+        # Si reranker non disponible, retourner les documents originaux
+        return documents[:top_k] if top_k else documents
+    
+    if top_k is None:
+        top_k = getattr(Config, 'RERANKER_FINAL_K', 3)
+    
+    try:
+        # Préparer les paires (query, document) pour le cross-encoder
+        pairs = [[query, doc.page_content] for doc in documents]
+        
+        # Calculer les scores de pertinence
+        scores = reranker.predict(pairs)
+        
+        # Créer une liste de tuples (score, document) et trier par score décroissant
+        scored_docs = list(zip(scores, documents))
+        scored_docs.sort(key=lambda x: x[0], reverse=True)
+        
+        # Retourner les top_k documents
+        reranked_docs = [doc for _, doc in scored_docs[:top_k]]
+        
+        return reranked_docs
+        
+    except Exception as e:
+        print(f"[RERANKER] ⚠️ Erreur lors du reranking: {str(e)}")
+        print("[RERANKER] Retour des documents originaux (sans reranking)")
+        return documents[:top_k] if top_k else documents
+
+        
 # Node functions
 def retrieve(state: Dict) -> Dict:
     """Retrieve documents from the vector store."""
@@ -195,11 +270,29 @@ def retrieve(state: Dict) -> Dict:
         # Le threading peut causer des conflits avec le runtime de LangGraph
         # Appel direct: si ça bloque, c'est que le problème vient de NomicEmbeddings/ChromaDB
         try:
-            print("[RETRIEVE] ⏳ Debut de retriever.invoke()...")
+            # Déterminer les paramètres du reranker
+            reranker_enabled = getattr(Config, 'RERANKER_ENABLED', True)
+            final_k = getattr(Config, 'RERANKER_FINAL_K', 3)
+            
+            # Le retriever a déjà été configuré avec le bon k dans get_retriever_instance
+            print("[RETRIEVE] ⏳ Début de retriever.invoke()...")
             documents = current_retriever.invoke(state["question"])
+            
+            # Appliquer le reranking si activé
+            if reranker_enabled and len(documents) > 1:
+                print(f"[RETRIEVE] ⏳ Reranking de {len(documents)} documents (top-{final_k})...")
+                rerank_start = time.time()
+                documents = rerank_documents(state["question"], documents, top_k=final_k)
+                rerank_time = time.time() - rerank_start
+                latencies["reranking"] = rerank_time
+                print(f"[RETRIEVE] ✅ Reranking terminé en {rerank_time:.3f}s ({len(documents)} documents finaux)")
+            elif not reranker_enabled:
+                # Si reranker désactivé, prendre les k premiers
+                documents = documents[:final_k]
+            
             elapsed_time = time.time() - start_time
             latencies["retrieval"] = elapsed_time
-            print(f"[RETRIEVE] ✅ retriever.invoke() termine avec succes en {elapsed_time:.2f}s")
+            print(f"[RETRIEVE] ✅ retriever.invoke() terminé avec succès en {elapsed_time:.2f}s")
         except Exception as e:
             elapsed_time = time.time() - start_time
             latencies["retrieval"] = elapsed_time
