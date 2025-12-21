@@ -53,8 +53,22 @@ def get_or_create_chroma_db(doc_splits: List, persist_directory: str = CHROMA_DB
     Vérifie si ChromaDB existe déjà et met à jour uniquement avec les nouveaux documents.
     Si clear_db est True, supprime complètement le dossier contenant la base et le recrée.
     """
+    # Détection automatique du device
+    device = "cpu"
+    try:
+        import torch
+        if torch.cuda.is_available():
+            device = "cuda"
+            print(f"[INFO] CUDA detecte pour ChromaDB: {torch.cuda.get_device_name(0)}")
+        else:
+            print("[INFO] CUDA non disponible pour ChromaDB, utilisation du CPU")
+    except Exception:
+        print("[INFO] Détection CUDA impossible, utilisation du CPU")
+    
     embedding_model = NomicEmbeddings(
-        model=Config.NomicEmbeddings_model, inference_mode="local", device="cuda"
+        model=Config.NomicEmbeddings_model, 
+        inference_mode="local", 
+        device=device
     )
 
     # 🔴 Si clear_db est True, on supprime totalement le dossier
@@ -91,21 +105,78 @@ def load_pdf_documents_from_folder(folder_path: str):
 def get_retriever(k: int = 3):
     """Crée un retriever pour récupérer les documents les plus pertinents."""
     
+    # Répertoire pour ChromaDB
+    chroma_db_path = CHROMA_DB_DIR
+    
+    # Vérifier si ChromaDB existe déjà
+    if os.path.exists(chroma_db_path) and os.listdir(chroma_db_path):
+        # Si ChromaDB existe, juste charger le retriever sans recharger les documents
+        print("[INFO] ChromaDB existe. Chargement du retriever uniquement...")
+        
+        # Détection intelligente du device
+        device = "cpu"  # Par défaut CPU
+        try:
+            import torch
+            if torch.cuda.is_available():
+                device = "cuda"
+                print(f"[INFO] CUDA detecte: {torch.cuda.get_device_name(0)}")
+            else:
+                print("[INFO] CUDA non disponible, utilisation du CPU")
+                print("[INFO] Pour utiliser GPU, installez PyTorch avec CUDA: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121")
+        except ImportError:
+            print("[INFO] PyTorch non disponible, utilisation du CPU")
+        except Exception as e:
+            print(f"[INFO] Erreur detection CUDA: {str(e)}, utilisation du CPU")
+        
+        embedding_model = NomicEmbeddings(
+            model=Config.NomicEmbeddings_model, 
+            inference_mode="local", 
+            device=device  # Détection automatique
+        )
+        vectorstore = Chroma(persist_directory=chroma_db_path, embedding_function=embedding_model)
+        print(f"[INFO] Retriever charge depuis ChromaDB existante (device: {device}).")
+        return vectorstore.as_retriever(search_kwargs={"k": k})
+    
+    # Si ChromaDB n'existe pas, charger et indexer les documents
+    print("[INFO] ChromaDB n'existe pas. Chargement des documents...")
+    print("[INFO] ⏳ Cette étape peut prendre plusieurs minutes la première fois...")
+    
     # Charger les documents web
-    web_docs = load_web_documents(urls)
+    print("[INFO] Chargement des documents web...")
+    try:
+        web_docs = load_web_documents(urls)
+        print(f"[INFO] {len(web_docs)} documents web chargés.")
+    except Exception as e:
+        print(f"⚠️ Erreur lors du chargement des documents web: {str(e)}")
+        web_docs = []
 
     # Charger automatiquement tous les PDFs du dossier "data/raw"
     raw_data_folder = os.path.join(project_root, "data", "raw")
-    pdf_docs = load_pdf_documents_from_folder(raw_data_folder)
+    pdf_docs = []
+    if os.path.exists(raw_data_folder):
+        try:
+            pdf_docs = load_pdf_documents_from_folder(raw_data_folder)
+            print(f"[INFO] {len(pdf_docs)} documents PDF chargés.")
+        except Exception as e:
+            print(f"⚠️ Erreur lors du chargement des PDFs: {str(e)}")
+    else:
+        print(f"[INFO] Dossier {raw_data_folder} n'existe pas. Aucun PDF chargé.")
     
     # Fusionner les deux listes de documents
     all_docs = web_docs + pdf_docs
     
-    # Diviser les documents en segments
-    doc_splits = split_documents(all_docs)
+    if not all_docs:
+        raise Exception("Aucun document trouvé à indexer. Vérifiez vos sources de documents.")
     
-    # Vérifier/créer la base ChromaDB
-    vectorstore = get_or_create_chroma_db(doc_splits, CHROMA_DB_DIR,False)
+    # Diviser les documents en segments
+    print("[INFO] Segmentation des documents...")
+    doc_splits = split_documents(all_docs)
+    print(f"[INFO] {len(doc_splits)} chunks créés.")
+    
+    # Créer la base ChromaDB
+    print("[INFO] Création de la base vectorielle ChromaDB...")
+    vectorstore = get_or_create_chroma_db(doc_splits, CHROMA_DB_DIR, clear_db=False)
+    print("[INFO] ChromaDB créée avec succès.")
     
     # Retourner le retriever
     return vectorstore.as_retriever(search_kwargs={"k": k})

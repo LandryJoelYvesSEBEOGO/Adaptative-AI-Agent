@@ -83,3 +83,19 @@ log/
 *.tmp
 *.temp
 *.bak
+
+# Fichiers de test et diagnostic
+test_*.py
+*_test.py
+*_diagnostic.py
+diagnostic_*.py
+close_*.py
+install_*.py
+
+# Rapports et solutions de diagnostic
+RAPPORT_*.txt
+SOLUTION_*.md
+LANCER_*.md
+
+# Fichiers de documentation temporaire (garder README.md)
+ARCHITECTURE_*.txt
