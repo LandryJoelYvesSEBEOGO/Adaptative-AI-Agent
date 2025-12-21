@@ -7,10 +7,16 @@ from .exceptions import (
     WorkflowException
 )
 
+# Metrics and logging
+from .metrics import get_metrics_collector
+from .logger import get_logger
+
 __all__ = [
     "RAGException",
     "RetrievalException",
     "GenerationException",
     "ValidationException",
-    "WorkflowException"
+    "WorkflowException",
+    "get_metrics_collector",
+    "get_logger"
 ]

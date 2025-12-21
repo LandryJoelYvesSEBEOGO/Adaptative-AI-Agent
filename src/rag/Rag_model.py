@@ -27,7 +27,13 @@ from src.core.exceptions import (
     LLMQuotaException, InvalidResponseException, MaxRetriesException,
     WebSearchException, HallucinationDetectedException, ValidationException
 )
+import uuid
+from src.core.metrics import get_metrics_collector
+from src.core.logger import get_logger
 
+# Initialiser logger et metrics
+logger = get_logger()
+metrics = get_metrics_collector()
 # Load environment variables
 load_dotenv()
 
@@ -155,12 +161,19 @@ class GraphState(TypedDict):
     loop_step: Annotated[int, operator.add]
     documents: List[str]
     error_history: List[str]  # Nouveau : historique des erreurs
+    conversation_id: Optional[str]  # ID de conversation pour métriques
+    latencies: Optional[Dict[str, float]]  # Latences pour métriques
 
 
 # Node functions
 def retrieve(state: Dict) -> Dict:
     """Retrieve documents from the vector store."""
+    start_time = time.time()
+    conversation_id = state.get("conversation_id", "unknown")
+    latencies = state.get("latencies", {})
+    
     try:
+        logger.info("Retrieval started", extra={"component": "retrieval", "conversation_id": conversation_id})
         print("---RETRIEVE---")
         if not state.get("question"):
             raise RetrievalException("Question manquante pour la récupération")
@@ -181,15 +194,15 @@ def retrieve(state: Dict) -> Dict:
         # IMPORTANT: LangGraph exécute les nœuds directement, sans threading supplémentaire
         # Le threading peut causer des conflits avec le runtime de LangGraph
         # Appel direct: si ça bloque, c'est que le problème vient de NomicEmbeddings/ChromaDB
-        start_time = time.time()
-        
         try:
             print("[RETRIEVE] ⏳ Debut de retriever.invoke()...")
             documents = current_retriever.invoke(state["question"])
             elapsed_time = time.time() - start_time
+            latencies["retrieval"] = elapsed_time
             print(f"[RETRIEVE] ✅ retriever.invoke() termine avec succes en {elapsed_time:.2f}s")
         except Exception as e:
             elapsed_time = time.time() - start_time
+            latencies["retrieval"] = elapsed_time
             print(f"[RETRIEVE] ❌ Exception apres {elapsed_time:.2f}s: {type(e).__name__}: {str(e)}")
             import traceback
             print("[RETRIEVE] Stack trace complete:")
@@ -202,18 +215,38 @@ def retrieve(state: Dict) -> Dict:
         
         if not documents or len(documents) == 0:
             print("⚠️ [RETRIEVE] Aucun document trouve")
+            logger.warning(
+                "No documents found",
+                extra={"component": "retrieval", "conversation_id": conversation_id}
+            )
             return {
                 "documents": [],
-                "error_history": state.get("error_history", []) + ["Aucun document trouve"]
+                "error_history": state.get("error_history", []) + ["Aucun document trouve"],
+                "latencies": latencies
             }
         
         print(f"[RETRIEVE] ✅ {len(documents)} documents trouves en {elapsed_time:.2f}s.")
-        return {"documents": documents}
+        logger.info(
+            "Retrieval completed",
+            extra={
+                "component": "retrieval",
+                "conversation_id": conversation_id,
+                "data": {"latency": elapsed_time, "num_documents": len(documents)}
+            }
+        )
+        return {"documents": documents, "latencies": latencies}
         
     except RetrievalException:
         raise
     except Exception as e:
+        elapsed_time = time.time() - start_time
+        latencies["retrieval"] = elapsed_time
         print(f"❌ [RETRIEVE] Exception non capturee: {str(e)}")
+        logger.error(
+            "Retrieval failed",
+            extra={"component": "retrieval", "conversation_id": conversation_id},
+            exc_info=True
+        )
         import traceback
         traceback.print_exc()
         raise RetrievalException(f"Erreur recuperation: {str(e)}") from e
@@ -221,7 +254,12 @@ def retrieve(state: Dict) -> Dict:
 
 def generate(state: Dict) -> Dict:
     """Generate an answer using RAG on the retrieved documents."""
+    start_time = time.time()
+    conversation_id = state.get("conversation_id", "unknown")
+    latencies = state.get("latencies", {})
+    
     try:
+        logger.info("Generation started", extra={"component": "generation", "conversation_id": conversation_id})
         print("---GENERATE---")
         
         if not state.get("documents"):
@@ -241,31 +279,60 @@ def generate(state: Dict) -> Dict:
         if not generation:
             raise InvalidResponseException("Réponse vide du LLM")
         
+        elapsed_time = time.time() - start_time
+        latencies["generation"] = elapsed_time
+        
+        logger.info(
+            "Generation completed",
+            extra={
+                "component": "generation",
+                "conversation_id": conversation_id,
+                "data": {"latency": elapsed_time}
+            }
+        )
+        
         return {
             "generation": generation,
-            "loop_step": state.get("loop_step", 0) + 1
+            "loop_step": state.get("loop_step", 0) + 1,
+            "latencies": latencies
         }
     except LLMQuotaException as e:
+        elapsed_time = time.time() - start_time
+        latencies["generation"] = elapsed_time
         raise LLMQuotaException(
             "Quota API dépassé. Veuillez réessayer plus tard.",
             {"loop_step": state.get("loop_step", 0)}
         ) from e
     except Exception as e:
+        elapsed_time = time.time() - start_time
+        latencies["generation"] = elapsed_time
         error_msg = f"Erreur lors de la génération: {str(e)}"
         print(f"❌ {error_msg}")
+        logger.error(
+            "Generation failed",
+            extra={"component": "generation", "conversation_id": conversation_id},
+            exc_info=True
+        )
         from src.core.exceptions import GenerationException
         raise GenerationException(error_msg) from e
 
 
 def grade_documents(state: Dict) -> Dict:
     """Grade the relevance of retrieved documents."""
+    start_time = time.time()
+    conversation_id = state.get("conversation_id", "unknown")
+    latencies = state.get("latencies", {})
+    
     try:
+        logger.info("Document grading started", extra={"component": "grading", "conversation_id": conversation_id})
         print("---CHECK DOCUMENT RELEVANCE TO QUESTION---")
         filtered_docs = []
         web_search = "No"
         
         if not state.get("documents"):
-            return {"documents": [], "web_search": "Yes"}
+            elapsed_time = time.time() - start_time
+            latencies["grading"] = elapsed_time
+            return {"documents": [], "web_search": "Yes", "latencies": latencies}
         
         for doc in state["documents"]:
             try:
@@ -301,16 +368,40 @@ def grade_documents(state: Dict) -> Dict:
                 web_search = "Yes"
                 continue
         
-        return {"documents": filtered_docs, "web_search": web_search}
+        elapsed_time = time.time() - start_time
+        latencies["grading"] = elapsed_time
+        
+        logger.info(
+            "Document grading completed",
+            extra={
+                "component": "grading",
+                "conversation_id": conversation_id,
+                "data": {"latency": elapsed_time, "num_filtered": len(filtered_docs)}
+            }
+        )
+        
+        return {"documents": filtered_docs, "web_search": web_search, "latencies": latencies}
     except Exception as e:
+        elapsed_time = time.time() - start_time
+        latencies["grading"] = elapsed_time
         print(f"❌ Erreur dans grade_documents: {str(e)}")
+        logger.error(
+            "Document grading failed",
+            extra={"component": "grading", "conversation_id": conversation_id},
+            exc_info=True
+        )
         # En cas d'erreur, on continue avec tous les documents
-        return {"documents": state.get("documents", []), "web_search": "Yes"}
+        return {"documents": state.get("documents", []), "web_search": "Yes", "latencies": latencies}
 
 
 def web_search(state: Dict) -> Dict:
     """Perform a web search based on the question."""
+    start_time = time.time()
+    conversation_id = state.get("conversation_id", "unknown")
+    latencies = state.get("latencies", {})
+    
     try:
+        logger.info("Web search started", extra={"component": "web_search", "conversation_id": conversation_id})
         print("---WEB SEARCH---")
         
         if not state.get("question"):
@@ -323,23 +414,46 @@ def web_search(state: Dict) -> Dict:
         
         if not docs:
             print("⚠️ Aucun résultat de recherche web")
-            return {"documents": state.get("documents", [])}
+            elapsed_time = time.time() - start_time
+            latencies["web_search"] = elapsed_time
+            return {"documents": state.get("documents", []), "latencies": latencies}
         
         web_results = "\n".join([d.get("content", "") for d in docs if d.get("content")])
         
         if not web_results:
             print("⚠️ Résultats web vides")
-            return {"documents": state.get("documents", [])}
+            elapsed_time = time.time() - start_time
+            latencies["web_search"] = elapsed_time
+            return {"documents": state.get("documents", []), "latencies": latencies}
         
         documents = state.get("documents", [])
         documents.append(Document(page_content=web_results))
         
-        return {"documents": documents}
+        elapsed_time = time.time() - start_time
+        latencies["web_search"] = elapsed_time
+        
+        logger.info(
+            "Web search completed",
+            extra={
+                "component": "web_search",
+                "conversation_id": conversation_id,
+                "data": {"latency": elapsed_time}
+            }
+        )
+        
+        return {"documents": documents, "latencies": latencies}
     except Exception as e:
+        elapsed_time = time.time() - start_time
+        latencies["web_search"] = elapsed_time
         error_msg = f"Erreur lors de la recherche web: {str(e)}"
         print(f"❌ {error_msg}")
+        logger.error(
+            "Web search failed",
+            extra={"component": "web_search", "conversation_id": conversation_id},
+            exc_info=True
+        )
         # Ne pas bloquer, continuer avec les documents existants
-        return {"documents": state.get("documents", [])}
+        return {"documents": state.get("documents", []), "latencies": latencies}
 
 
 # Edge functions
@@ -494,8 +608,25 @@ graph = workflow.compile()
 
 # Final response function
 def get_final_response(query: str) -> str:
-    """Run the workflow and return the final generated response."""
+    """Point d'entrée principal pour obtenir une réponse RAG."""
+    conversation_id = str(uuid.uuid4())
+    trace_id = str(uuid.uuid4())
+    
+    # Début de la mesure end-to-end
+    start_time = time.time()
+    latencies = {}
+    
     try:
+        logger.info(
+            "Request started",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id,
+                "data": {"query": query[:100]}
+            }
+        )
+        
         if not query or not query.strip():
             return "⚠️ Veuillez fournir une question valide."
         
@@ -506,7 +637,7 @@ def get_final_response(query: str) -> str:
             print(f"⚠️ Erreur réécriture, utilisation query originale: {str(e)}")
             rewritten_query = query
         
-        # Initialisation de l'état avec max_retries
+        # Initialisation de l'état avec max_retries, conversation_id et latencies
         max_retries = getattr(Config, 'MAX_RETRIES', 3)
         initial_state = GraphState(
             question=rewritten_query,
@@ -516,34 +647,171 @@ def get_final_response(query: str) -> str:
             answers=0,
             loop_step=0,
             documents=[],
-            error_history=[]
+            error_history=[],
+            conversation_id=conversation_id,
+            latencies=latencies
         )
         
         # Exécution du workflow
         final_state = graph.invoke(initial_state)
         
+        # Récupérer les latences mises à jour depuis le state
+        latencies = final_state.get("latencies", latencies)
+        
         # Extraction de la réponse
         generation = final_state.get("generation")
         if generation and hasattr(generation, "content"):
-            return generation.content
+            response = generation.content
         elif generation:
-            return str(generation)
+            response = str(generation)
         else:
-            return "⚠️ Aucune réponse générée. Veuillez reformuler votre question."
-    
+            response = "⚠️ Aucune réponse générée. Veuillez reformuler votre question."
+        
+        # Mesurer latence end-to-end
+        latencies["end_to_end"] = time.time() - start_time
+        
+        # Enregistrer les métriques
+        if getattr(Config, 'METRICS_ENABLED', True):
+            metrics.record_request(
+                conversation_id=conversation_id,
+                query=query,
+                latencies=latencies,
+                success=True,
+                num_documents=len(final_state.get("documents", [])),
+                response_length=len(response) if response else 0
+            )
+        
+        logger.info(
+            "Request completed",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id,
+                "data": {"latency": latencies["end_to_end"]}
+            }
+        )
+        
+        return response
+        
     except MaxRetriesException as e:
-        return "⚠️ Désolé, j'ai atteint le nombre maximum de tentatives. Veuillez reformuler votre question ou réessayer plus tard."
+        latencies["end_to_end"] = time.time() - start_time
+        error_msg = "⚠️ Désolé, j'ai atteint le nombre maximum de tentatives. Veuillez reformuler votre question ou réessayer plus tard."
+        
+        if getattr(Config, 'METRICS_ENABLED', True):
+            metrics.record_request(
+                conversation_id=conversation_id,
+                query=query,
+                latencies=latencies,
+                success=False,
+                error="MaxRetriesException"
+            )
+        
+        logger.warning(
+            "Request max retries",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id
+            }
+        )
+        
+        return error_msg
     
     except LLMQuotaException as e:
-        return "⚠️ Le service est temporairement saturé. Veuillez réessayer dans quelques instants."
+        latencies["end_to_end"] = time.time() - start_time
+        error_msg = "⚠️ Le service est temporairement saturé. Veuillez réessayer dans quelques instants."
+        
+        if getattr(Config, 'METRICS_ENABLED', True):
+            metrics.record_request(
+                conversation_id=conversation_id,
+                query=query,
+                latencies=latencies,
+                success=False,
+                error="LLMQuotaException"
+            )
+        
+        logger.error(
+            "Request quota exceeded",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id
+            }
+        )
+        
+        return error_msg
     
     except RetrievalException as e:
-        return "⚠️ Impossible de trouver des documents pertinents. Veuillez reformuler votre question."
+        latencies["end_to_end"] = time.time() - start_time
+        error_msg = "⚠️ Impossible de trouver des documents pertinents. Veuillez reformuler votre question."
+        
+        if getattr(Config, 'METRICS_ENABLED', True):
+            metrics.record_request(
+                conversation_id=conversation_id,
+                query=query,
+                latencies=latencies,
+                success=False,
+                error="RetrievalException"
+            )
+        
+        logger.error(
+            "Request retrieval failed",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id
+            }
+        )
+        
+        return error_msg
     
     except WebSearchException as e:
-        return "⚠️ Erreur lors de la recherche web. Veuillez réessayer."
-    
+        latencies["end_to_end"] = time.time() - start_time
+        error_msg = "⚠️ Erreur lors de la recherche web. Veuillez réessayer."
+        
+        if getattr(Config, 'METRICS_ENABLED', True):
+            metrics.record_request(
+                conversation_id=conversation_id,
+                query=query,
+                latencies=latencies,
+                success=False,
+                error="WebSearchException"
+            )
+        
+        logger.error(
+            "Request web search failed",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id
+            }
+        )
+        
+        return error_msg
+        
     except Exception as e:
-        error_msg = f"Une erreur inattendue s'est produite: {str(e)}"
-        print(f"❌ {error_msg}")
-        return "⚠️ Une erreur technique s'est produite. Veuillez réessayer ou contacter le support si le problème persiste."
+        latencies["end_to_end"] = time.time() - start_time
+        error_msg = str(e)
+        
+        # Enregistrer l'erreur
+        if getattr(Config, 'METRICS_ENABLED', True):
+            metrics.record_request(
+                conversation_id=conversation_id,
+                query=query,
+                latencies=latencies,
+                success=False,
+                error=error_msg
+            )
+        
+        logger.error(
+            "Request failed",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id,
+                "data": {"error": error_msg}
+            },
+            exc_info=True
+        )
+        
+        raise

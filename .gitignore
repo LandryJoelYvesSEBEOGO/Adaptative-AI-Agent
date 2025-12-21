@@ -99,3 +99,8 @@ LANCER_*.md
 
 # Fichiers de documentation temporaire (garder README.md)
 ARCHITECTURE_*.txt
+
+# Fichiers de métriques et logs
+data/metrics/
+data/logs/
+*.log
