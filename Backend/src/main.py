@@ -8,7 +8,6 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.audio.Speech_To_Text import AudioRecorder
 from src.rag.Rag_model import get_final_response
 from config.Config import Config
 
@@ -37,41 +36,10 @@ st.sidebar.markdown("""
 """)
 
 # Initialize session state variables
-if "recorder" not in st.session_state:
-    st.session_state.recorder = AudioRecorder(sample_rate=16000, channels=1)
-    st.session_state.is_recording = False
-    st.session_state.audio_file = None
-    st.session_state.transcription = None  # Store transcription here
 if "messages" not in st.session_state:
     st.session_state.messages = [
         {"role": "assistant", "content": "Ask me a question about AI, ML, or my knowledge base!"}
     ]
-
-recorder = st.session_state.recorder
-
-# Sidebar for recording
-st.sidebar.markdown("### Enregistrement vocal")
-if not st.session_state.is_recording and st.sidebar.button("🎤 Démarrer l'enregistrement"):
-    st.session_state.is_recording = True
-    recorder.start_recording()
-    st.sidebar.success("Enregistrement démarré!")
-
-if st.session_state.is_recording and st.sidebar.button("⏹️ Arrêter l'enregistrement"):
-    st.session_state.is_recording = False
-    audio_file = recorder.stop_recording()
-    st.session_state.audio_file = audio_file
-    st.sidebar.success(f"Enregistrement arrêté et sauvegardé: {audio_file}")
-
-# Process recorded audio
-if st.session_state.audio_file:
-    st.sidebar.write("Audio enregistré: ", st.session_state.audio_file)
-    if st.sidebar.button("Transcrire l'audio"):
-        transcription = recorder.transcribe_audio(st.session_state.audio_file, model_size="medium.en", device="cuda")
-        if transcription:
-            st.session_state.transcription = transcription
-            st.sidebar.success("Transcription réussie et insérée comme requête.")
-        else:
-            st.sidebar.error("Erreur lors de la transcription de l'audio.")
 
 # Display chat messages
 for message in st.session_state.messages:
@@ -80,11 +48,6 @@ for message in st.session_state.messages:
 
 # Input field for new questions
 user_input = st.chat_input("Posez une question :")
-
-# If transcription exists, pre-fill the input field and clear transcription
-if st.session_state.transcription and not user_input:
-    user_input = st.session_state.transcription
-    st.session_state.transcription = None  # Clear transcription after use
 
 # Process user input and generate response
 if user_input:
