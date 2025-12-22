@@ -88,6 +88,12 @@ class Config:
     ANSWER_QUALITY_COHERENCE_WEIGHT = 0.10  # Poids pour Coherence (10%)
     ANSWER_QUALITY_ACCEPTANCE_THRESHOLD = 0.65  # Seuil d'acceptation (0-1)
     ANSWER_QUALITY_ADAPTIVE_THRESHOLD = True  # Seuil adaptatif basé sur les scores moyens
+    # Configuration Streaming des Réponses
+    STREAMING_ENABLED = True  # Activer/désactiver le streaming
+    STREAMING_CHUNK_SIZE = 1  # Nombre de tokens à streamer à la fois (1 = token par token)
+
+
+
 # Global variables
 class SPEAKER_TYPES:
   USER = "user"

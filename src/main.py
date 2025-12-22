@@ -10,6 +10,7 @@ if project_root not in sys.path:
 
 from src.audio.Speech_To_Text import AudioRecorder
 from src.rag.Rag_model import get_final_response
+from config.Config import Config
 
 # Load environment variables
 load_dotenv()
@@ -93,21 +94,45 @@ if user_input:
     with st.chat_message("user"):
         st.write(user_input)
 
-# Generate assistant response
+    # Generate assistant response
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
+        streaming_enabled = getattr(Config, 'STREAMING_ENABLED', True)
+        
+        if streaming_enabled:
             try:
-                # Generate response using the RAG model
+                # Utiliser streaming
+                from src.rag.Rag_model import get_final_response_stream
+                response_chunks = []
+                message_placeholder = st.empty()
+                
+                for chunk in get_final_response_stream(user_input):
+                    response_chunks.append(chunk)
+                    # Afficher progressivement
+                    message_placeholder.write("".join(response_chunks))
+                
+                # Récupérer la réponse complète
+                full_response = "".join(response_chunks)
+                
+                # Ajouter à l'historique
+                st.session_state.messages.append({"role": "assistant", "content": full_response})
+            except Exception as e:
+                # Fallback sur non-streaming
+                print(f"⚠️ Erreur streaming, fallback: {str(e)}")
                 response = get_final_response(user_input)
                 st.write(response)
-                # Add assistant message to chat history
                 st.session_state.messages.append({"role": "assistant", "content": response})
-            except Exception as e:
-                error_message = f"⚠️ Une erreur s'est produite lors de la génération de la réponse. Veuillez réessayer."
-                st.error(error_message)
-                st.session_state.messages.append({
-                    "role": "assistant", 
-                    "content": error_message
-                })
-                # Log l'erreur pour debugging (en production, utiliser un logger)
-                print(f"❌ Erreur dans main.py: {str(e)}")
+        else:
+            # Génération normale sans streaming
+            with st.spinner("Thinking..."):
+                try:
+                    response = get_final_response(user_input)
+                    st.write(response)
+                    st.session_state.messages.append({"role": "assistant", "content": response})
+                except Exception as e:
+                    error_message = f"⚠️ Une erreur s'est produite lors de la génération de la réponse. Veuillez réessayer."
+                    st.error(error_message)
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": error_message
+                    })
+                    print(f"❌ Erreur dans main.py: {str(e)}")

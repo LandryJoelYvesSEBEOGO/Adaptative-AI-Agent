@@ -542,6 +542,120 @@ def generate(state: Dict) -> Dict:
         from src.core.exceptions import GenerationException
         raise GenerationException(error_msg) from e
 
+def generate_stream(state: Dict, stream_callback=None):
+    """
+    Génère une réponse avec streaming token par token.
+    
+    Args:
+        state: État du graph
+        stream_callback: Fonction callback appelée pour chaque chunk (chunk: str) -> None
+    
+    Returns:
+        Dict avec la génération complète
+    """
+    start_time = time.time()
+    conversation_id = state.get("conversation_id", "unknown")
+    latencies = state.get("latencies", {})
+    
+    try:
+        logger.info("Generation with streaming started", extra={"component": "generation", "conversation_id": conversation_id})
+        print("---GENERATE (STREAMING)---")
+        
+        if not state.get("documents"):
+            raise GenerationException("Aucun document disponible pour la génération")
+        
+        # Vérifier si les citations sont activées
+        citations_enabled = getattr(Config, 'CITATIONS_ENABLED', True)
+        
+        # Formater les documents
+        docs_txt = format_docs(state["documents"], with_citations=citations_enabled)
+        rag_prompt_formatted = prompt["rag_prompt"].format(
+            context=docs_txt, 
+            question=state["question"]
+        )
+        
+        # Accumulateur pour la réponse complète
+        full_response = ""
+        
+        # Streamer la réponse
+        def _generate_stream():
+            return local_llm.stream([HumanMessage(content=rag_prompt_formatted)])
+        
+        try:
+            stream = _generate_stream()
+            
+            for chunk in stream:
+                if hasattr(chunk, 'content') and chunk.content:
+                    chunk_text = chunk.content
+                    full_response += chunk_text
+                    
+                    # Appeler le callback si fourni
+                    if stream_callback:
+                        stream_callback(chunk_text)
+            
+            # Traiter les citations si activées
+            if citations_enabled:
+                sources = extract_sources_from_documents(state["documents"])
+                full_response, references = format_citations(full_response, sources)
+                
+                # Streamer les références aussi
+                if references:
+                    if stream_callback:
+                        stream_callback(references)
+                    full_response = full_response + references
+            
+        except Exception as stream_error:
+            # Fallback sur génération non-streaming en cas d'erreur
+            print(f"⚠️ Erreur streaming, fallback sur génération normale: {str(stream_error)}")
+            logger.warning(
+                "Streaming failed, falling back to non-streaming",
+                extra={"component": "generation", "conversation_id": conversation_id, "error": str(stream_error)}
+            )
+            
+            def _generate():
+                return local_llm.invoke([HumanMessage(content=rag_prompt_formatted)])
+            
+            generation = retry_with_backoff(_generate)
+            full_response = generation.content if hasattr(generation, 'content') else str(generation)
+            
+            # Traiter les citations
+            if citations_enabled:
+                sources = extract_sources_from_documents(state["documents"])
+                full_response, references = format_citations(full_response, sources)
+                if references:
+                    full_response = full_response + references
+        
+        elapsed_time = time.time() - start_time
+        latencies["generation"] = elapsed_time
+        
+        logger.info(
+            "Generation with streaming completed",
+            extra={
+                "component": "generation",
+                "conversation_id": conversation_id,
+                "data": {"latency": elapsed_time, "citations_enabled": citations_enabled}
+            }
+        )
+        
+        return {
+            "generation": full_response,
+            "loop_step": state.get("loop_step", 0) + 1,
+            "latencies": latencies
+        }
+        
+    except Exception as e:
+        elapsed_time = time.time() - start_time
+        latencies["generation"] = elapsed_time
+        error_msg = f"Erreur lors de la génération avec streaming: {str(e)}"
+        print(f"❌ {error_msg}")
+        logger.error(
+            "Generation with streaming failed",
+            extra={"component": "generation", "conversation_id": conversation_id},
+            exc_info=True
+        )
+        from src.core.exceptions import GenerationException
+        raise GenerationException(error_msg) from e
+
 
 def grade_documents(state: Dict) -> Dict:
     """Grade the relevance of retrieved documents using multi-criteria evaluation."""
@@ -1264,3 +1378,167 @@ def get_final_response(query: str) -> str:
         )
         
         raise
+
+def get_final_response_stream(query: str):
+    """
+    Point d'entrée principal pour obtenir une réponse RAG avec streaming.
+    Retourne un générateur qui yield les chunks de la réponse.
+    
+    Args:
+        query: Question de l'utilisateur
+    
+    Yields:
+        str: Chunks de la réponse au fur et à mesure de la génération
+    """
+    conversation_id = str(uuid.uuid4())
+    trace_id = str(uuid.uuid4())
+    
+    # Début de la mesure end-to-end
+    start_time = time.time()
+    latencies = {}
+    
+    try:
+        logger.info(
+            "Streaming request started",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id,
+                "data": {"query": query[:100]}
+            }
+        )
+        
+        if not query or not query.strip():
+            yield "⚠️ Veuillez fournir une question valide."
+            return
+        
+        # Réécriture de la requête
+        try:
+            rewritten_query = Rewrite_query(query)
+        except Exception as e:
+            print(f"⚠️ Erreur réécriture, utilisation query originale: {str(e)}")
+            rewritten_query = query
+        
+        # Initialisation de l'état
+        max_retries = getattr(Config, 'MAX_RETRIES', 3)
+        initial_state = GraphState(
+            question=rewritten_query,
+            generation="",
+            web_search="No",
+            max_retries=max_retries,
+            answers=0,
+            loop_step=0,
+            documents=[],
+            error_history=[],
+            conversation_id=conversation_id,
+            latencies=latencies
+        )
+        
+        # Exécuter le workflow jusqu'à la génération
+        # On doit exécuter manuellement les étapes jusqu'à generate
+        current_state = initial_state
+        
+        # Route question
+        route = route_question(current_state)
+        if route == "websearch":
+            current_state = web_search(current_state)
+        else:
+            current_state = retrieve(current_state)
+            current_state = grade_documents(current_state)
+            
+            # Décider si on fait web search
+            if current_state.get("web_search") == "Yes":
+                current_state = web_search(current_state)
+        
+        # Maintenant on génère avec streaming
+        # Utiliser generate_stream avec callback
+        # Note: On doit adapter car generate_stream attend un callback, pas un générateur
+        # Solution: créer un wrapper qui yield les chunks
+        
+        chunks_received = []
+        
+        def stream_callback_wrapper(chunk: str):
+            """Wrapper pour collecter les chunks."""
+            chunks_received.append(chunk)
+        
+        # Générer avec streaming
+        generation_state = generate_stream(current_state, stream_callback=stream_callback_wrapper)
+        
+        # Yielder tous les chunks
+        for chunk in chunks_received:
+            yield chunk
+        
+        # Mettre à jour l'état final
+        final_state = generation_state
+        
+        # Continuer avec le grading (sans streaming)
+        # Note: Le grading et quality scoring ne stream pas
+        try:
+            grade_result = grade_generation_v_documents_and_question(final_state)
+            if grade_result == "useful":
+                # Succès
+                pass
+            elif grade_result == "not supported" and final_state.get("loop_step", 0) < max_retries:
+                # Retry (ne devrait pas arriver souvent avec streaming)
+                print("⚠️ Retry nécessaire après streaming")
+        except Exception as e:
+            print(f"⚠️ Erreur lors du grading: {str(e)}")
+        
+        # Exécuter le quality scoring aussi
+        try:
+            final_state = grade_answer_quality(final_state)
+        except Exception as e:
+            print(f"⚠️ Erreur lors du quality scoring: {str(e)}")
+        
+        # Récupérer les latences
+        latencies = final_state.get("latencies", latencies)
+        latencies["end_to_end"] = time.time() - start_time
+        
+        # Enregistrer les métriques
+        if getattr(Config, 'METRICS_ENABLED', True):
+            answer_quality_scores = final_state.get("answer_quality_scores")
+            metrics.record_request(
+                conversation_id=conversation_id,
+                query=query,
+                latencies=latencies,
+                success=True,
+                num_documents=len(final_state.get("documents", [])),
+                response_length=len(full_response) if full_response else 0,
+                answer_quality_score=answer_quality_scores.get("overall_score") if answer_quality_scores else None,
+                answer_quality_scores=answer_quality_scores
+            )
+        
+        logger.info(
+            "Streaming request completed",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id,
+                "data": {"latency": latencies["end_to_end"]}
+            }
+        )
+        
+    except Exception as e:
+        latencies["end_to_end"] = time.time() - start_time
+        error_msg = f"⚠️ Erreur lors de la génération: {str(e)}"
+        yield error_msg
+        
+        if getattr(Config, 'METRICS_ENABLED', True):
+            metrics.record_request(
+                conversation_id=conversation_id,
+                query=query,
+                latencies=latencies,
+                success=False,
+                error=str(e)
+            )
+        
+        logger.error(
+            "Streaming request failed",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id,
+                "data": {"error": str(e)}
+            },
+            exc_info=True
+        )
