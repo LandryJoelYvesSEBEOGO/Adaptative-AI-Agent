@@ -91,7 +91,25 @@ class Config:
     # Configuration Streaming des Réponses
     STREAMING_ENABLED = True  # Activer/désactiver le streaming
     STREAMING_CHUNK_SIZE = 1  # Nombre de tokens à streamer à la fois (1 = token par token)
-
+    # Configuration Retry Policy Sophistiquée
+    RETRY_JITTER_ENABLED = True  # Activer le jitter aléatoire
+    RETRY_JITTER_MAX = 0.3  # Jitter maximum (30% du délai)
+    CIRCUIT_BREAKER_ENABLED = True  # Activer le circuit breaker
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD = 5  # Nombre d'échecs avant ouverture
+    CIRCUIT_BREAKER_RECOVERY_TIMEOUT = 60  # Temps avant tentative de récupération (secondes)
+    CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS = 3  # Nombre max d'appels en half-open
+    
+    # Configuration Fallback Models
+    FALLBACK_MODELS_ENABLED = True  # Activer les modèles de fallback
+    FALLBACK_MODEL_SECONDARY = "meta-llama/llama-prompt-guard-2-86m"  # Modèle secondaire (si disponible)
+    FALLBACK_MODEL_FAST = "openai/gpt-oss-120b"  # Modèle rapide (si disponible)
+    
+    # Configuration Stratégies de Recovery
+    RECOVERY_STRATEGY_ENABLED = True  # Activer les stratégies de recovery
+    RECOVERY_INCREASE_TEMPERATURE = True  # Augmenter température pour hallucinations
+    RECOVERY_TEMPERATURE_INCREASE = 0.2  # Augmentation de température
+    RECOVERY_EXPAND_SEARCH = True  # Élargir la recherche pour "not useful"
+    RECOVERY_SEARCH_EXPANSION_FACTOR = 1.5  # Facteur d'expansion (k * factor)
 
 
 # Global variables

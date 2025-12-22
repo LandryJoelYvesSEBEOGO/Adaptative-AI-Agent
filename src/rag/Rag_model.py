@@ -34,6 +34,12 @@ import uuid
 from src.core.metrics import get_metrics_collector
 from src.core.retrieval_metrics import get_retrieval_metrics_collector
 from src.core.logger import get_logger
+from src.core.retry_policy import (
+    retry_with_backoff_advanced,
+    get_circuit_breaker
+)
+from src.core.recovery_strategies import RecoveryStrategy
+from src.core.fallback import get_fallback_manager
 
 # Initialiser logger et metrics
 logger = get_logger()
@@ -48,6 +54,13 @@ local_llm = ChatGroq(
     groq_api_key=Config.GROQ_API_KEY
 )
 
+# Circuit breakers pour différents services
+llm_circuit_breaker = get_circuit_breaker("llm") if getattr(Config, 'CIRCUIT_BREAKER_ENABLED', True) else None
+web_search_circuit_breaker = get_circuit_breaker("web_search") if getattr(Config, 'CIRCUIT_BREAKER_ENABLED', True) else None
+retrieval_circuit_breaker = get_circuit_breaker("retrieval") if getattr(Config, 'CIRCUIT_BREAKER_ENABLED', True) else None
+
+# Fallback manager
+fallback_manager = get_fallback_manager() if getattr(Config, 'FALLBACK_MODELS_ENABLED', True) else None
 llm_json_mode = ChatGroq(
     model_name=Config.GROQ_model, 
     temperature=0,
@@ -103,28 +116,71 @@ web_search_tool = TavilySearchResults(k=3, tavily_api_key=Config.TAVILY_API_KEY)
 # Load prompts
 prompt = get_prompts()
 
-# Fonction helper pour retry avec backoff
+# Fonction helper pour retry avec backoff (conservée pour compatibilité)
 def retry_with_backoff(func: Callable, max_retries: int = None, 
                       initial_delay: int = None) -> any:
-    """Retry une fonction avec backoff exponentiel."""
-    if max_retries is None:
-        max_retries = getattr(Config, 'MAX_RETRIES', 3)
-    if initial_delay is None:
-        initial_delay = getattr(Config, 'RETRY_INITIAL_DELAY', 1)
-    
-    backoff_factor = getattr(Config, 'RETRY_BACKOFF_FACTOR', 2)
-    
-    for attempt in range(max_retries):
-        try:
-            return func()
-        except (LLMTimeoutException, LLMQuotaException, Exception) as e:
-            if attempt == max_retries - 1:
-                raise
-            delay = initial_delay * (backoff_factor ** attempt)
-            print(f"⚠️ Tentative {attempt + 1}/{max_retries} échouée. Retry dans {delay}s...")
-            time.sleep(delay)
-    raise MaxRetriesException(f"Échec après {max_retries} tentatives")
+    """Retry une fonction avec backoff exponentiel (wrapper pour compatibilité)."""
+    # Utiliser la version avancée si activée
+    if getattr(Config, 'CIRCUIT_BREAKER_ENABLED', True) or getattr(Config, 'RETRY_JITTER_ENABLED', True):
+        # Déterminer quel circuit breaker utiliser selon le contexte
+        circuit_breaker = None  # Peut être défini selon le contexte
+        
+        return retry_with_backoff_advanced(
+            func,
+            max_retries=max_retries,
+            initial_delay=initial_delay,
+            circuit_breaker=circuit_breaker
+        )
+    else:
+        # Ancienne implémentation simple
+        if max_retries is None:
+            max_retries = getattr(Config, 'MAX_RETRIES', 3)
+        if initial_delay is None:
+            initial_delay = getattr(Config, 'RETRY_INITIAL_DELAY', 1)
+        
+        backoff_factor = getattr(Config, 'RETRY_BACKOFF_FACTOR', 2)
+        
+        for attempt in range(max_retries):
+            try:
+                return func()
+            except (LLMTimeoutException, LLMQuotaException, Exception) as e:
+                if attempt == max_retries - 1:
+                    raise
+                delay = initial_delay * (backoff_factor ** attempt)
+                print(f"⚠️ Tentative {attempt + 1}/{max_retries} échouée. Retry dans {delay}s...")
+                time.sleep(delay)
+        raise MaxRetriesException(f"Échec après {max_retries} tentatives")
 
+def get_llm_with_fallback():
+    """
+    Récupère le LLM actuel, avec fallback automatique si activé.
+    """
+    if fallback_manager and getattr(Config, 'FALLBACK_MODELS_ENABLED', True):
+        llm = fallback_manager.get_current_llm()
+        if llm:
+            return llm
+    
+    # Fallback sur le LLM principal
+    return local_llm
+
+def get_llm_json_with_fallback():
+    """
+    Récupère le LLM en mode JSON avec fallback automatique.
+    """
+    if fallback_manager and getattr(Config, 'FALLBACK_MODELS_ENABLED', True):
+        current_llm = fallback_manager.get_current_llm()
+        if current_llm:
+            # Créer un nouveau LLM avec les mêmes paramètres mais en mode JSON
+            model_name = fallback_manager.get_current_model_name()
+            return ChatGroq(
+                model_name=model_name,
+                temperature=0,
+                model_kwargs={"response_format": {"type": "json_object"}},
+                groq_api_key=Config.GROQ_API_KEY
+            )
+    
+    # Fallback sur le LLM JSON principal
+    return llm_json_mode
 
 def Rewrite_query(query: str) -> str:
     """Rewrite the query to be more specific."""
@@ -136,9 +192,13 @@ def Rewrite_query(query: str) -> str:
         rewritting_prompt_formatted = prompt["Rewritting_prompt"].format(query=query)
         
         def _call_llm():
-            return local_llm.invoke([HumanMessage(content=rewritting_prompt_formatted)])
+            llm = get_llm_with_fallback()
+            return llm.invoke([HumanMessage(content=rewritting_prompt_formatted)])
         
-        generation = retry_with_backoff(_call_llm)
+        generation = retry_with_backoff_advanced(
+            _call_llm,
+            circuit_breaker=llm_circuit_breaker
+        )
         
         if hasattr(generation, "content"):
             return generation.content
@@ -486,9 +546,31 @@ def generate(state: Dict) -> Dict:
         )
         
         def _generate():
-            return local_llm.invoke([HumanMessage(content=rag_prompt_formatted)])
+            llm = get_llm_with_fallback()
+            return llm.invoke([HumanMessage(content=rag_prompt_formatted)])
         
-        generation = retry_with_backoff(_generate)
+        try:
+            generation = retry_with_backoff_advanced(
+                _generate,
+                circuit_breaker=llm_circuit_breaker
+            )
+        except MaxRetriesException as e:
+            # Essayer avec le modèle de fallback suivant
+            if fallback_manager and fallback_manager.try_next_model():
+                print(f"[FALLBACK] Tentative avec modèle: {fallback_manager.get_current_model_name()}")
+                try:
+                    generation = retry_with_backoff_advanced(
+                        _generate,
+                        circuit_breaker=llm_circuit_breaker
+                    )
+                except Exception:
+                    # Réinitialiser au modèle principal
+                    fallback_manager.reset()
+                    raise
+            else:
+                if fallback_manager:
+                    fallback_manager.reset()
+                raise
         
         if not generation:
             raise InvalidResponseException("Réponse vide du LLM")
@@ -579,7 +661,8 @@ def generate_stream(state: Dict, stream_callback=None):
         
         # Streamer la réponse
         def _generate_stream():
-            return local_llm.stream([HumanMessage(content=rag_prompt_formatted)])
+            llm = get_llm_with_fallback()
+            return llm.stream([HumanMessage(content=rag_prompt_formatted)])
         
         try:
             stream = _generate_stream()
@@ -613,9 +696,13 @@ def generate_stream(state: Dict, stream_callback=None):
             )
             
             def _generate():
-                return local_llm.invoke([HumanMessage(content=rag_prompt_formatted)])
+                llm = get_llm_with_fallback()
+                return llm.invoke([HumanMessage(content=rag_prompt_formatted)])
             
-            generation = retry_with_backoff(_generate)
+            generation = retry_with_backoff_advanced(
+                _generate,
+                circuit_breaker=llm_circuit_breaker
+            )
             full_response = generation.content if hasattr(generation, 'content') else str(generation)
             
             # Traiter les citations
@@ -690,12 +777,16 @@ def grade_documents(state: Dict) -> Dict:
                     )
                     
                     def _grade():
-                        return llm_json_mode.invoke(
+                        llm = get_llm_json_with_fallback()
+                        return llm.invoke(
                             [SystemMessage(content=prompt["multi_criteria_grader_instructions"])] +
                             [HumanMessage(content=grader_prompt_formatted)]
                         )
                     
-                    result = retry_with_backoff(_grade)
+                    result = retry_with_backoff_advanced(
+                        _grade,
+                        circuit_breaker=llm_circuit_breaker
+                    )
                     
                     try:
                         grade_data = json.loads(result.content)
@@ -766,12 +857,16 @@ def grade_documents(state: Dict) -> Dict:
                     )
                     
                     def _grade():
-                        return llm_json_mode.invoke(
+                        llm = get_llm_json_with_fallback()
+                        return llm.invoke(
                             [SystemMessage(content=prompt["doc_grader_instructions"])] +
                             [HumanMessage(content=doc_grader_prompt_formatted)]
                         )
                     
-                    result = retry_with_backoff(_grade)
+                    result = retry_with_backoff_advanced(
+                        _grade,
+                        circuit_breaker=llm_circuit_breaker
+                    )
                     
                     try:
                         grade_data = json.loads(result.content)
@@ -840,7 +935,11 @@ def web_search(state: Dict) -> Dict:
         def _search():
             return web_search_tool.invoke({"query": state["question"]})
         
-        docs = retry_with_backoff(_search, max_retries=2)
+        docs = retry_with_backoff_advanced(
+            _search,
+            max_retries=2,
+            circuit_breaker=web_search_circuit_breaker
+        )
         
         if not docs:
             print("⚠️ Aucun résultat de recherche web")
@@ -893,12 +992,16 @@ def route_question(state: Dict) -> str:
         print("---ROUTE QUESTION---")
         
         def _route():
-            return llm_json_mode.invoke(
+            llm = get_llm_json_with_fallback()
+            return llm.invoke(
                 [SystemMessage(content=prompt["router_instructions"])] +
                 [HumanMessage(content=state["question"])]
             )
         
-        route_result = retry_with_backoff(_route)
+        route_result = retry_with_backoff_advanced(
+            _route,
+            circuit_breaker=llm_circuit_breaker
+        )
         
         try:
             route_data = json.loads(route_result.content)
@@ -945,12 +1048,16 @@ def grade_generation_v_documents_and_question(state: Dict) -> str:
             )
             
             def _check_hallucination():
-                return llm_json_mode.invoke(
+                llm = get_llm_json_with_fallback()
+                return llm.invoke(
                     [SystemMessage(content=prompt["hallucination_grader_instructions"])] +
                     [HumanMessage(content=hallucination_grader_prompt_formatted)]
                 )
             
-            result = retry_with_backoff(_check_hallucination)
+            result = retry_with_backoff_advanced(
+                _check_hallucination,
+                circuit_breaker=llm_circuit_breaker
+            )
             
             try:
                 grade_data = json.loads(result.content)
@@ -962,6 +1069,15 @@ def grade_generation_v_documents_and_question(state: Dict) -> str:
             if grade != "yes":
                 if loop_step < max_retries:
                     print(f"---DECISION: GENERATION NOT GROUNDED, RETRYING ({loop_step + 1}/{max_retries})---")
+                    # Appliquer stratégie de recovery pour hallucinations
+                    if getattr(Config, 'RECOVERY_STRATEGY_ENABLED', True):
+                        try:
+                            current_llm = get_llm_with_fallback()
+                            state = RecoveryStrategy.handle_hallucination(state, current_llm)
+                        except Exception as e:
+                            print(f"⚠️ Erreur lors de l'application de la stratégie de recovery: {str(e)}")
+                    
+                   
                     return "not supported"
                 else:
                     print("---DECISION: MAX RETRIES REACHED---")
@@ -984,12 +1100,16 @@ def grade_generation_v_documents_and_question(state: Dict) -> str:
             )
             
             def _check_useful():
-                return llm_json_mode.invoke(
+                llm = get_llm_json_with_fallback()
+                return llm.invoke(
                     [SystemMessage(content=prompt["answer_grader_instructions"])] +
                     [HumanMessage(content=answer_grader_prompt_formatted)]
                 )
             
-            result = retry_with_backoff(_check_useful)
+            result = retry_with_backoff_advanced(
+                _check_useful,
+                circuit_breaker=llm_circuit_breaker
+            )
             
             try:
                 grade_data = json.loads(result.content)
@@ -998,7 +1118,17 @@ def grade_generation_v_documents_and_question(state: Dict) -> str:
                 print("⚠️ Erreur parsing JSON answer. Par défaut: no")
                 grade = "no"
             
-            return "useful" if grade == "yes" else "not useful"
+            if grade == "yes":
+                return "useful"
+            else:
+                # Appliquer stratégie de recovery pour "not useful"
+                if getattr(Config, 'RECOVERY_STRATEGY_ENABLED', True):
+                    try:
+                        state = RecoveryStrategy.handle_not_useful(state)
+                    except Exception as e:
+                        print(f"⚠️ Erreur lors de l'application de la stratégie de recovery: {str(e)}")
+                
+                return "not useful"
         except Exception as e:
             print(f"⚠️ Erreur vérification utilité: {str(e)}. Par défaut: not useful")
             return "not useful"
@@ -1045,12 +1175,16 @@ def grade_answer_quality(state: Dict) -> Dict:
         )
         
         def _score_quality():
-            return llm_json_mode.invoke(
+            llm = get_llm_json_with_fallback()
+            return llm.invoke(
                 [SystemMessage(content=prompt["answer_quality_scorer_instructions"])] +
                 [HumanMessage(content=quality_prompt_formatted)]
             )
         
-        result = retry_with_backoff(_score_quality)
+        result = retry_with_backoff_advanced(
+            _score_quality,
+            circuit_breaker=llm_circuit_breaker
+        )
         
         try:
             quality_data = json.loads(result.content)
