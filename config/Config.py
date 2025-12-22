@@ -79,7 +79,15 @@ class Config:
         # Configuration Citations Automatiques
     CITATIONS_ENABLED = True  # Activer/désactiver les citations automatiques
     CITATION_FORMAT = "numeric"  # Format des citations: "numeric" ([1], [2]) ou "inline" (source name)
-
+    # Configuration Answer Quality Scoring
+    ANSWER_QUALITY_SCORING_ENABLED = True  # Activer/désactiver le scoring de qualité de réponse
+    ANSWER_QUALITY_RELEVANCE_WEIGHT = 0.30  # Poids pour Relevance (30%)
+    ANSWER_QUALITY_COMPLETENESS_WEIGHT = 0.25  # Poids pour Completeness (25%)
+    ANSWER_QUALITY_CONCISENESS_WEIGHT = 0.15  # Poids pour Conciseness (15%)
+    ANSWER_QUALITY_ACCURACY_WEIGHT = 0.20  # Poids pour Accuracy (20%)
+    ANSWER_QUALITY_COHERENCE_WEIGHT = 0.10  # Poids pour Coherence (10%)
+    ANSWER_QUALITY_ACCEPTANCE_THRESHOLD = 0.65  # Seuil d'acceptation (0-1)
+    ANSWER_QUALITY_ADAPTIVE_THRESHOLD = True  # Seuil adaptatif basé sur les scores moyens
 # Global variables
 class SPEAKER_TYPES:
   USER = "user"

@@ -47,7 +47,16 @@ class MetricsCollector:
                 "retrieval": [],
                 "generation": [],
                 "grading": [],
-                "web_search": []
+                "web_search": [],
+                "answer_quality": []
+            },
+            "answer_quality_scores": [],
+            "answer_quality_breakdown": {
+                "relevance": [],
+                "completeness": [],
+                "conciseness": [],
+                "accuracy": [],
+                "coherence": []
             },
             "last_updated": datetime.now().isoformat()
         }
@@ -62,7 +71,9 @@ class MetricsCollector:
         success: bool = True,
         error: Optional[str] = None,
         num_documents: Optional[int] = None,
-        response_length: Optional[int] = None
+        response_length: Optional[int] = None,
+        answer_quality_score: Optional[float] = None,
+        answer_quality_scores: Optional[Dict] = None
     ):
         """
         Enregistre une requête complète avec ses métriques.
@@ -75,6 +86,8 @@ class MetricsCollector:
             error: Message d'erreur si échec
             num_documents: Nombre de documents récupérés
             response_length: Longueur de la réponse générée
+            answer_quality_score: Score global de qualité de réponse (0-1)
+            answer_quality_scores: Dict avec les scores détaillés (relevance, completeness, etc.)
         """
         timestamp = datetime.now().isoformat()
         
@@ -86,7 +99,9 @@ class MetricsCollector:
             "error": error,
             "latencies": latencies,
             "num_documents": num_documents,
-            "response_length": response_length
+            "response_length": response_length,
+            "answer_quality_score": answer_quality_score,
+            "answer_quality_scores": answer_quality_scores
         }
         
         # Écrire dans le fichier JSONL (une ligne par requête)
@@ -119,6 +134,34 @@ class MetricsCollector:
                 # Garder seulement les 1000 dernières valeurs
                 if len(summary["latencies"][metric_name]) > 1000:
                     summary["latencies"][metric_name] = summary["latencies"][metric_name][-1000:]
+        
+        # Ajouter les scores de qualité
+        answer_quality_score = entry.get("answer_quality_score")
+        if answer_quality_score is not None:
+            if "answer_quality_scores" not in summary:
+                summary["answer_quality_scores"] = []
+            summary["answer_quality_scores"].append(answer_quality_score)
+            if len(summary["answer_quality_scores"]) > 1000:
+                summary["answer_quality_scores"] = summary["answer_quality_scores"][-1000:]
+        
+        # Ajouter les scores détaillés
+        answer_quality_scores = entry.get("answer_quality_scores")
+        if answer_quality_scores and isinstance(answer_quality_scores, dict):
+            if "answer_quality_breakdown" not in summary:
+                summary["answer_quality_breakdown"] = {
+                    "relevance": [],
+                    "completeness": [],
+                    "conciseness": [],
+                    "accuracy": [],
+                    "coherence": []
+                }
+            for criterion in ["relevance", "completeness", "conciseness", "accuracy", "coherence"]:
+                if criterion in answer_quality_scores:
+                    score_value = answer_quality_scores[criterion]
+                    if isinstance(score_value, (int, float)):
+                        summary["answer_quality_breakdown"][criterion].append(float(score_value))
+                        if len(summary["answer_quality_breakdown"][criterion]) > 1000:
+                            summary["answer_quality_breakdown"][criterion] = summary["answer_quality_breakdown"][criterion][-1000:]
         
         summary["last_updated"] = datetime.now().isoformat()
         
@@ -166,11 +209,48 @@ class MetricsCollector:
                 "max": max(sorted_values)
             }
         
+        # Statistiques pour les scores de qualité
+        quality_stats = {}
+        if summary.get("answer_quality_scores"):
+            quality_values = summary["answer_quality_scores"]
+            sorted_quality = sorted(quality_values)
+            n_quality = len(sorted_quality)
+            quality_stats["overall"] = {
+                "count": n_quality,
+                "mean": sum(sorted_quality) / n_quality if n_quality > 0 else 0,
+                "median": sorted_quality[n_quality // 2] if n_quality > 0 else 0,
+                "p95": sorted_quality[int(n_quality * 0.95)] if n_quality > 0 else 0,
+                "p99": sorted_quality[int(n_quality * 0.99)] if n_quality > 0 else 0,
+                "min": min(sorted_quality) if sorted_quality else 0,
+                "max": max(sorted_quality) if sorted_quality else 0
+            }
+        
+        # Statistiques pour chaque critère
+        quality_breakdown_stats = {}
+        for criterion, values in summary.get("answer_quality_breakdown", {}).items():
+            if not values:
+                quality_breakdown_stats[criterion] = {
+                    "count": 0,
+                    "mean": 0,
+                    "median": 0
+                }
+                continue
+            
+            sorted_criterion = sorted(values)
+            n_criterion = len(sorted_criterion)
+            quality_breakdown_stats[criterion] = {
+                "count": n_criterion,
+                "mean": sum(sorted_criterion) / n_criterion if n_criterion > 0 else 0,
+                "median": sorted_criterion[n_criterion // 2] if n_criterion > 0 else 0
+            }
+        
         return {
             "total_requests": summary["total_requests"],
             "total_errors": summary["total_errors"],
             "error_rate": summary["total_errors"] / summary["total_requests"] if summary["total_requests"] > 0 else 0,
             "latency_stats": stats,
+            "answer_quality_stats": quality_stats,
+            "answer_quality_breakdown": quality_breakdown_stats,
             "last_updated": summary["last_updated"]
         }
 

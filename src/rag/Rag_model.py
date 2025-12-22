@@ -262,6 +262,7 @@ class GraphState(TypedDict):
     error_history: List[str]  # Nouveau : historique des erreurs
     conversation_id: Optional[str]  # ID de conversation pour métriques
     latencies: Optional[Dict[str, float]]  # Latences pour métriques
+    answer_quality_scores: Optional[Dict]  # Scores de qualité de la réponse
 
 # Reranker global (lazy loading)
 _reranker = None
@@ -894,12 +895,141 @@ def grade_generation_v_documents_and_question(state: Dict) -> str:
         return "max retries"  # Sécurité: arrêt en cas d'erreur
 
 
+def grade_answer_quality(state: Dict) -> Dict:
+    """Évalue la qualité de la réponse générée sur 5 critères."""
+    start_time = time.time()
+    conversation_id = state.get("conversation_id", "unknown")
+    latencies = state.get("latencies", {})
+    
+    try:
+        logger.info("Answer quality scoring started", extra={"component": "answer_quality", "conversation_id": conversation_id})
+        print("---ANSWER QUALITY SCORING---")
+        
+        # Vérifier si activé
+        quality_scoring_enabled = getattr(Config, 'ANSWER_QUALITY_SCORING_ENABLED', True)
+        if not quality_scoring_enabled:
+            elapsed_time = time.time() - start_time
+            latencies["answer_quality"] = elapsed_time
+            return {"answer_quality_scores": None, "latencies": latencies}
+        
+        if not state.get("generation"):
+            elapsed_time = time.time() - start_time
+            latencies["answer_quality"] = elapsed_time
+            return {"answer_quality_scores": None, "latencies": latencies}
+        
+        # Extraire le contenu de la réponse
+        generation_content = state["generation"].content if hasattr(state["generation"], "content") else str(state["generation"])
+        
+        # Formater les documents pour le contexte
+        context = format_docs(state.get("documents", []), with_citations=False)
+        
+        # Préparer le prompt
+        quality_prompt_formatted = prompt["answer_quality_scorer_prompt"].format(
+            question=state["question"],
+            answer=generation_content[:4000],  # Limiter la longueur
+            context=context[:3000]  # Limiter le contexte
+        )
+        
+        def _score_quality():
+            return llm_json_mode.invoke(
+                [SystemMessage(content=prompt["answer_quality_scorer_instructions"])] +
+                [HumanMessage(content=quality_prompt_formatted)]
+            )
+        
+        result = retry_with_backoff(_score_quality)
+        
+        try:
+            quality_data = json.loads(result.content)
+            
+            # Extraire les scores
+            scores = quality_data.get("scores", {})
+            relevance = float(scores.get("relevance", 0.0))
+            completeness = float(scores.get("completeness", 0.0))
+            conciseness = float(scores.get("conciseness", 0.0))
+            accuracy = float(scores.get("accuracy", 0.0))
+            coherence = float(scores.get("coherence", 0.0))
+            
+            # Calculer le score pondéré
+            relevance_weight = getattr(Config, 'ANSWER_QUALITY_RELEVANCE_WEIGHT', 0.30)
+            completeness_weight = getattr(Config, 'ANSWER_QUALITY_COMPLETENESS_WEIGHT', 0.25)
+            conciseness_weight = getattr(Config, 'ANSWER_QUALITY_CONCISENESS_WEIGHT', 0.15)
+            accuracy_weight = getattr(Config, 'ANSWER_QUALITY_ACCURACY_WEIGHT', 0.20)
+            coherence_weight = getattr(Config, 'ANSWER_QUALITY_COHERENCE_WEIGHT', 0.10)
+            
+            overall_score = (
+                relevance * relevance_weight +
+                completeness * completeness_weight +
+                conciseness * conciseness_weight +
+                accuracy * accuracy_weight +
+                coherence * coherence_weight
+            )
+            
+            # Vérifier le seuil d'acceptation
+            threshold = getattr(Config, 'ANSWER_QUALITY_ACCEPTANCE_THRESHOLD', 0.65)
+            accepted = overall_score >= threshold
+            
+            quality_scores = {
+                "relevance": relevance,
+                "completeness": completeness,
+                "conciseness": conciseness,
+                "accuracy": accuracy,
+                "coherence": coherence,
+                "overall_score": overall_score,
+                "accepted": accepted,
+                "reasoning": quality_data.get("reasoning", "No reasoning provided")
+            }
+            
+            print(f"📊 Answer Quality Scores:")
+            print(f"   Relevance: {relevance:.2f}")
+            print(f"   Completeness: {completeness:.2f}")
+            print(f"   Conciseness: {conciseness:.2f}")
+            print(f"   Accuracy: {accuracy:.2f}")
+            print(f"   Coherence: {coherence:.2f}")
+            print(f"   Overall Score: {overall_score:.2f} ({'✅ Accepted' if accepted else '❌ Below threshold'})")
+            
+            elapsed_time = time.time() - start_time
+            latencies["answer_quality"] = elapsed_time
+            
+            logger.info(
+                "Answer quality scoring completed",
+                extra={
+                    "component": "answer_quality",
+                    "conversation_id": conversation_id,
+                    "data": {
+                        "latency": elapsed_time,
+                        "overall_score": overall_score,
+                        "accepted": accepted
+                    }
+                }
+            )
+            
+            return {"answer_quality_scores": quality_scores, "latencies": latencies}
+            
+        except json.JSONDecodeError as e:
+            print(f"⚠️ Erreur parsing JSON answer quality: {str(e)}")
+            elapsed_time = time.time() - start_time
+            latencies["answer_quality"] = elapsed_time
+            return {"answer_quality_scores": None, "latencies": latencies}
+            
+    except Exception as e:
+        elapsed_time = time.time() - start_time
+        latencies["answer_quality"] = elapsed_time
+        print(f"❌ Erreur dans grade_answer_quality: {str(e)}")
+        logger.error(
+            "Answer quality scoring failed",
+            extra={"component": "answer_quality", "conversation_id": conversation_id},
+            exc_info=True
+        )
+        return {"answer_quality_scores": None, "latencies": latencies}
+
+
 # Workflow definition and graph compilation
 workflow = StateGraph(GraphState)
 workflow.add_node("websearch", web_search)
 workflow.add_node("retrieve", retrieve)
 workflow.add_node("grade_documents", grade_documents)
 workflow.add_node("generate", generate)
+workflow.add_node("grade_answer_quality", grade_answer_quality)
 
 workflow.set_conditional_entry_point(
     route_question,
@@ -912,8 +1042,9 @@ workflow.add_conditional_edges(
     decide_to_generate,
     {"websearch": "websearch", "generate": "generate"},
 )
+workflow.add_edge("generate", "grade_answer_quality")
 workflow.add_conditional_edges(
-    "generate",
+    "grade_answer_quality",
     grade_generation_v_documents_and_question,
     {"not supported": "generate", "useful": END, "not useful": "websearch", "max retries": END},
 )
@@ -987,13 +1118,16 @@ def get_final_response(query: str) -> str:
         
         # Enregistrer les métriques
         if getattr(Config, 'METRICS_ENABLED', True):
+            answer_quality_scores = final_state.get("answer_quality_scores")
             metrics.record_request(
                 conversation_id=conversation_id,
                 query=query,
                 latencies=latencies,
                 success=True,
                 num_documents=len(final_state.get("documents", [])),
-                response_length=len(response) if response else 0
+                response_length=len(response) if response else 0,
+                answer_quality_score=answer_quality_scores.get("overall_score") if answer_quality_scores else None,
+                answer_quality_scores=answer_quality_scores
             )
         
         logger.info(
