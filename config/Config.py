@@ -110,6 +110,25 @@ class Config:
     RECOVERY_TEMPERATURE_INCREASE = 0.2  # Augmentation de température
     RECOVERY_EXPAND_SEARCH = True  # Élargir la recherche pour "not useful"
     RECOVERY_SEARCH_EXPANSION_FACTOR = 1.5  # Facteur d'expansion (k * factor)
+    # ===== PROMPT ENGINEERING AVANCÉ =====
+    # Few-Shot Learning
+    FEW_SHOT_ENABLED = True
+    FEW_SHOT_NUM_EXAMPLES = 2  # Nombre d'exemples à inclure (2-3 recommandé)
+    FEW_SHOT_EXAMPLES_FILE = os.path.join(project_root, "data", "few_shot_examples.json")
+    FEW_SHOT_SIMILARITY_THRESHOLD = 0.7  # Seuil de similarité pour sélection
+
+    # Chain-of-Thought
+    CHAIN_OF_THOUGHT_ENABLED = True
+    CHAIN_OF_THOUGHT_FOR_COMPLEX = True  # Activer CoT pour questions complexes uniquement
+    CHAIN_OF_THOUGHT_COMPLEXITY_THRESHOLD = 50  # Nombre de mots pour considérer comme complexe
+
+    # Role-Based Prompting
+    ROLE_BASED_PROMPTING_ENABLED = True
+    ROLE_DETECTION_ENABLED = True  # Détecter automatiquement le rôle selon le contexte
+
+    # Structured Output
+    STRUCTURED_OUTPUT_ENABLED = False  # Désactivé par défaut (peut augmenter tokens)
+    STRUCTURED_OUTPUT_FORMAT = "markdown"  # "markdown" ou "json"
 
 
 # Global variables

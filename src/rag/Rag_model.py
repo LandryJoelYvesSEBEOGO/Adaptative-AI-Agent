@@ -540,6 +540,8 @@ def generate(state: Dict) -> Dict:
         
         # Formater les documents (avec ou sans numéros de citation)
         docs_txt = format_docs(state["documents"], with_citations=citations_enabled)
+        prompt = get_prompts(question=state["question"])  # Passer la question
+        
         rag_prompt_formatted = prompt["rag_prompt"].format(
             context=docs_txt, 
             question=state["question"]
@@ -651,6 +653,10 @@ def generate_stream(state: Dict, stream_callback=None):
         
         # Formater les documents
         docs_txt = format_docs(state["documents"], with_citations=citations_enabled)
+        
+        # Obtenir les prompts avec la question pour few-shot et role detection
+        prompt = get_prompts(question=state["question"])
+        
         rag_prompt_formatted = prompt["rag_prompt"].format(
             context=docs_txt, 
             question=state["question"]
@@ -693,6 +699,13 @@ def generate_stream(state: Dict, stream_callback=None):
             logger.warning(
                 "Streaming failed, falling back to non-streaming",
                 extra={"component": "generation", "conversation_id": conversation_id, "error": str(stream_error)}
+            )
+            
+            # S'assurer que le prompt est bien formaté avec la question
+            prompt = get_prompts(question=state["question"])
+            rag_prompt_formatted = prompt["rag_prompt"].format(
+                context=docs_txt, 
+                question=state["question"]
             )
             
             def _generate():

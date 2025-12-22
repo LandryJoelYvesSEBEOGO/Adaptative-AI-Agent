@@ -1,3 +1,13 @@
+# Ajoutez ces imports en haut du fichier
+from config.Config import Config
+from src.core.few_shot_examples import select_similar_examples, format_few_shot_examples
+from src.core.prompt_templates import (
+    get_role_prompt, detect_role_from_question,
+    get_chain_of_thought_instruction,
+    format_structured_output_instruction
+)
+
+# Modifiez le prompt RAG dans get_prompts():
 def get_prompts(
     router_instructions=None,
     doc_grader_instructions=None,
@@ -11,15 +21,40 @@ def get_prompts(
     multi_criteria_grader_instructions=None,
     multi_criteria_grader_prompt=None,
     answer_quality_scorer_instructions=None,  
-    answer_quality_scorer_prompt=None,  
+    answer_quality_scorer_prompt=None,
+    question=None,  # Nouveau paramètre pour few-shot et role detection
 ):
     """
-    Génère et retourne un ensemble de prompts pour différentes étapes d'un système de question-réponse basé sur la récupération de documents.
-
-    Retourne :
-        dict: Un dictionnaire contenant les différentes instructions et prompts nécessaires.
+    Génère et retourne un ensemble de prompts pour différentes étapes.
+    
+    Args:
+        question: Question de l'utilisateur (pour few-shot et role detection)
+        ... (autres paramètres existants)
     """
-
+    
+    # Détecter le rôle si nécessaire
+    role_key = None
+    if question and getattr(Config, 'ROLE_BASED_PROMPTING_ENABLED', True):
+        role_key = detect_role_from_question(question)
+    
+    role_prefix = get_role_prompt(role_key) if role_key else ""
+    
+    # Sélectionner les exemples few-shot
+    few_shot_examples = []
+    few_shot_text = ""
+    if question and getattr(Config, 'FEW_SHOT_ENABLED', True):
+        num_examples = getattr(Config, 'FEW_SHOT_NUM_EXAMPLES', 2)
+        few_shot_examples = select_similar_examples(question, num_examples)
+        few_shot_text = format_few_shot_examples(few_shot_examples)
+    
+    # Instruction Chain-of-Thought
+    cot_instruction = ""
+    if question:
+        cot_instruction = get_chain_of_thought_instruction(question)
+    
+    # Instruction Structured Output
+    structured_output = format_structured_output_instruction()
+    
     prompts = {
         # Router Instructions
         "router_instructions": router_instructions or """You are an expert at routing a user question to a vectorstore or web search.
@@ -44,18 +79,20 @@ def get_prompts(
         Carefully and objectively assess whether the document contains at least some information that is relevant to the question.
         Return JSON with a single key, 'binary_score', that is either 'yes' or 'no' to indicate relevance.""",
 
-        # RAG Prompt
-        "rag_prompt": rag_prompt or """You are an assistant for question-answering tasks. 
-        Here is the context to use to answer the question:\n\n{context} 
-        Think carefully about the above context. 
-        Now, review the user question:\n\n{question}
-        Provide an answer to this question using only the above context. 
-        Use three sentences maximum and keep the answer concise.
-        
-        IMPORTANT: When referencing information from the context, cite your sources using the format [1], [2], [3], etc., where the number corresponds to the document number in the context above.
-        For example: "Python is a programming language [1] that supports multiple paradigms [2]."
-        
-        Answer:""",
+        # RAG Prompt (MODIFIÉ)
+        "rag_prompt": rag_prompt or (
+            f"""{role_prefix}You are an assistant for question-answering tasks. 
+{few_shot_text}{cot_instruction}{structured_output}Here is the context to use to answer the question:\n\n{{context}} 
+Think carefully about the above context. 
+Now, review the user question:\n\n{{question}}
+Provide an answer to this question using only the above context. 
+Use three sentences maximum and keep the answer concise.
+
+IMPORTANT: When referencing information from the context, cite your sources using the format [1], [2], [3], etc., where the number corresponds to the document number in the context above.
+For example: "Python is a programming language [1] that supports multiple paradigms [2]."
+
+Answer:"""
+        ),
 
         # Hallucination Grader
         "hallucination_grader_instructions": hallucination_grader_instructions or """You are a teacher grading a quiz. 
