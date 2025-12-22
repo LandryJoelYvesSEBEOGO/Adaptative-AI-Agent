@@ -10,6 +10,8 @@ def get_prompts(
     Rewritting_prompt=None,
     multi_criteria_grader_instructions=None,
     multi_criteria_grader_prompt=None,
+    answer_quality_scorer_instructions=None,  
+    answer_quality_scorer_prompt=None,  
 ):
     """
     Génère et retourne un ensemble de prompts pour différentes étapes d'un système de question-réponse basé sur la récupération de documents.
@@ -131,6 +133,39 @@ Evaluate the document on all 5 criteria and provide detailed scores. Consider:
 - FRESHNESS: Is the information current? (Estimate if date not provided)
 - AUTHORITY: Is the source credible? (Infer from domain/context if not explicit)
 - CLARITY: Is the content easy to understand and well-organized?
+
+Return a JSON object with the structure specified in the instructions.""",
+        # Answer Quality Scorer Instructions
+        "answer_quality_scorer_instructions": answer_quality_scorer_instructions or """You are an expert evaluator assessing the quality of a generated answer.
+
+Evaluate the answer on 5 dimensions (0.0 to 1.0):
+1. RELEVANCE: Does the answer directly address and answer the question? (0.0 = not relevant, 1.0 = highly relevant)
+2. COMPLETENESS: Does the answer provide complete information to fully address the question? (0.0 = incomplete, 1.0 = complete)
+3. CONCISENESS: Is the answer concise without unnecessary verbosity? (0.0 = too verbose, 1.0 = perfectly concise)
+4. ACCURACY: Is the answer factually accurate based on the provided context? (0.0 = inaccurate, 1.0 = highly accurate)
+5. COHERENCE: Is the answer coherent, well-structured, and easy to understand? (0.0 = incoherent, 1.0 = very coherent)
+
+Return a JSON object with:
+- 'scores': object with keys 'relevance', 'completeness', 'conciseness', 'accuracy', 'coherence' (each 0.0-1.0)
+- 'overall_score': weighted average (float 0.0-1.0)
+- 'accepted': boolean indicating if answer quality is acceptable (based on threshold >= 0.65)
+- 'reasoning': brief explanation of the scores (2-3 sentences)""",
+
+        "answer_quality_scorer_prompt": answer_quality_scorer_prompt or """Here is the user question:
+{question}
+
+Here is the generated answer:
+{answer}
+
+Here is the context used to generate the answer:
+{context}
+
+Evaluate the answer quality on all 5 criteria. Consider:
+- RELEVANCE: Does it directly answer the question?
+- COMPLETENESS: Is all necessary information included?
+- CONCISENESS: Is it appropriately brief without being too verbose?
+- ACCURACY: Is it factually correct based on the context?
+- COHERENCE: Is it well-structured and easy to follow?
 
 Return a JSON object with the structure specified in the instructions."""
 

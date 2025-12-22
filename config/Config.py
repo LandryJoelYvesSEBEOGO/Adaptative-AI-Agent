@@ -79,6 +79,38 @@ class Config:
         # Configuration Citations Automatiques
     CITATIONS_ENABLED = True  # Activer/désactiver les citations automatiques
     CITATION_FORMAT = "numeric"  # Format des citations: "numeric" ([1], [2]) ou "inline" (source name)
+    # Configuration Answer Quality Scoring
+    ANSWER_QUALITY_SCORING_ENABLED = True  # Activer/désactiver le scoring de qualité de réponse
+    ANSWER_QUALITY_RELEVANCE_WEIGHT = 0.30  # Poids pour Relevance (30%)
+    ANSWER_QUALITY_COMPLETENESS_WEIGHT = 0.25  # Poids pour Completeness (25%)
+    ANSWER_QUALITY_CONCISENESS_WEIGHT = 0.15  # Poids pour Conciseness (15%)
+    ANSWER_QUALITY_ACCURACY_WEIGHT = 0.20  # Poids pour Accuracy (20%)
+    ANSWER_QUALITY_COHERENCE_WEIGHT = 0.10  # Poids pour Coherence (10%)
+    ANSWER_QUALITY_ACCEPTANCE_THRESHOLD = 0.65  # Seuil d'acceptation (0-1)
+    ANSWER_QUALITY_ADAPTIVE_THRESHOLD = True  # Seuil adaptatif basé sur les scores moyens
+    # Configuration Streaming des Réponses
+    STREAMING_ENABLED = True  # Activer/désactiver le streaming
+    STREAMING_CHUNK_SIZE = 1  # Nombre de tokens à streamer à la fois (1 = token par token)
+    # Configuration Retry Policy Sophistiquée
+    RETRY_JITTER_ENABLED = True  # Activer le jitter aléatoire
+    RETRY_JITTER_MAX = 0.3  # Jitter maximum (30% du délai)
+    CIRCUIT_BREAKER_ENABLED = True  # Activer le circuit breaker
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD = 5  # Nombre d'échecs avant ouverture
+    CIRCUIT_BREAKER_RECOVERY_TIMEOUT = 60  # Temps avant tentative de récupération (secondes)
+    CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS = 3  # Nombre max d'appels en half-open
+    
+    # Configuration Fallback Models
+    FALLBACK_MODELS_ENABLED = True  # Activer les modèles de fallback
+    FALLBACK_MODEL_SECONDARY = "meta-llama/llama-prompt-guard-2-86m"  # Modèle secondaire (si disponible)
+    FALLBACK_MODEL_FAST = "openai/gpt-oss-120b"  # Modèle rapide (si disponible)
+    
+    # Configuration Stratégies de Recovery
+    RECOVERY_STRATEGY_ENABLED = True  # Activer les stratégies de recovery
+    RECOVERY_INCREASE_TEMPERATURE = True  # Augmenter température pour hallucinations
+    RECOVERY_TEMPERATURE_INCREASE = 0.2  # Augmentation de température
+    RECOVERY_EXPAND_SEARCH = True  # Élargir la recherche pour "not useful"
+    RECOVERY_SEARCH_EXPANSION_FACTOR = 1.5  # Facteur d'expansion (k * factor)
+
 
 # Global variables
 class SPEAKER_TYPES:

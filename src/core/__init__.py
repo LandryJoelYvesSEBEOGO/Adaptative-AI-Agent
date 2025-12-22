@@ -17,6 +17,14 @@ from .retrieval_metrics import (
     calculate_mean_average_precision,
     calculate_retrieval_metrics
 )
+from src.core.retry_policy import (
+    retry_with_backoff_advanced,
+    get_circuit_breaker,
+    CircuitBreaker,
+    CircuitState
+)
+from src.core.recovery_strategies import RecoveryStrategy
+from src.core.fallback import get_fallback_manager, FallbackManager
 
 __all__ = [
     "RAGException",
@@ -30,5 +38,12 @@ __all__ = [
     "calculate_precision_at_k",
     "calculate_recall_at_k",
     "calculate_mean_average_precision",
-    "calculate_retrieval_metrics"
+    "calculate_retrieval_metrics",
+    "retry_with_backoff_advanced",
+    "get_circuit_breaker",
+    "CircuitBreaker",
+    "CircuitState",
+    "RecoveryStrategy",
+    "get_fallback_manager",
+    "FallbackManager"
 ]

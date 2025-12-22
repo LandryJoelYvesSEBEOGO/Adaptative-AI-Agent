@@ -34,6 +34,12 @@ import uuid
 from src.core.metrics import get_metrics_collector
 from src.core.retrieval_metrics import get_retrieval_metrics_collector
 from src.core.logger import get_logger
+from src.core.retry_policy import (
+    retry_with_backoff_advanced,
+    get_circuit_breaker
+)
+from src.core.recovery_strategies import RecoveryStrategy
+from src.core.fallback import get_fallback_manager
 
 # Initialiser logger et metrics
 logger = get_logger()
@@ -48,6 +54,13 @@ local_llm = ChatGroq(
     groq_api_key=Config.GROQ_API_KEY
 )
 
+# Circuit breakers pour différents services
+llm_circuit_breaker = get_circuit_breaker("llm") if getattr(Config, 'CIRCUIT_BREAKER_ENABLED', True) else None
+web_search_circuit_breaker = get_circuit_breaker("web_search") if getattr(Config, 'CIRCUIT_BREAKER_ENABLED', True) else None
+retrieval_circuit_breaker = get_circuit_breaker("retrieval") if getattr(Config, 'CIRCUIT_BREAKER_ENABLED', True) else None
+
+# Fallback manager
+fallback_manager = get_fallback_manager() if getattr(Config, 'FALLBACK_MODELS_ENABLED', True) else None
 llm_json_mode = ChatGroq(
     model_name=Config.GROQ_model, 
     temperature=0,
@@ -103,28 +116,71 @@ web_search_tool = TavilySearchResults(k=3, tavily_api_key=Config.TAVILY_API_KEY)
 # Load prompts
 prompt = get_prompts()
 
-# Fonction helper pour retry avec backoff
+# Fonction helper pour retry avec backoff (conservée pour compatibilité)
 def retry_with_backoff(func: Callable, max_retries: int = None, 
                       initial_delay: int = None) -> any:
-    """Retry une fonction avec backoff exponentiel."""
-    if max_retries is None:
-        max_retries = getattr(Config, 'MAX_RETRIES', 3)
-    if initial_delay is None:
-        initial_delay = getattr(Config, 'RETRY_INITIAL_DELAY', 1)
-    
-    backoff_factor = getattr(Config, 'RETRY_BACKOFF_FACTOR', 2)
-    
-    for attempt in range(max_retries):
-        try:
-            return func()
-        except (LLMTimeoutException, LLMQuotaException, Exception) as e:
-            if attempt == max_retries - 1:
-                raise
-            delay = initial_delay * (backoff_factor ** attempt)
-            print(f"⚠️ Tentative {attempt + 1}/{max_retries} échouée. Retry dans {delay}s...")
-            time.sleep(delay)
-    raise MaxRetriesException(f"Échec après {max_retries} tentatives")
+    """Retry une fonction avec backoff exponentiel (wrapper pour compatibilité)."""
+    # Utiliser la version avancée si activée
+    if getattr(Config, 'CIRCUIT_BREAKER_ENABLED', True) or getattr(Config, 'RETRY_JITTER_ENABLED', True):
+        # Déterminer quel circuit breaker utiliser selon le contexte
+        circuit_breaker = None  # Peut être défini selon le contexte
+        
+        return retry_with_backoff_advanced(
+            func,
+            max_retries=max_retries,
+            initial_delay=initial_delay,
+            circuit_breaker=circuit_breaker
+        )
+    else:
+        # Ancienne implémentation simple
+        if max_retries is None:
+            max_retries = getattr(Config, 'MAX_RETRIES', 3)
+        if initial_delay is None:
+            initial_delay = getattr(Config, 'RETRY_INITIAL_DELAY', 1)
+        
+        backoff_factor = getattr(Config, 'RETRY_BACKOFF_FACTOR', 2)
+        
+        for attempt in range(max_retries):
+            try:
+                return func()
+            except (LLMTimeoutException, LLMQuotaException, Exception) as e:
+                if attempt == max_retries - 1:
+                    raise
+                delay = initial_delay * (backoff_factor ** attempt)
+                print(f"⚠️ Tentative {attempt + 1}/{max_retries} échouée. Retry dans {delay}s...")
+                time.sleep(delay)
+        raise MaxRetriesException(f"Échec après {max_retries} tentatives")
 
+def get_llm_with_fallback():
+    """
+    Récupère le LLM actuel, avec fallback automatique si activé.
+    """
+    if fallback_manager and getattr(Config, 'FALLBACK_MODELS_ENABLED', True):
+        llm = fallback_manager.get_current_llm()
+        if llm:
+            return llm
+    
+    # Fallback sur le LLM principal
+    return local_llm
+
+def get_llm_json_with_fallback():
+    """
+    Récupère le LLM en mode JSON avec fallback automatique.
+    """
+    if fallback_manager and getattr(Config, 'FALLBACK_MODELS_ENABLED', True):
+        current_llm = fallback_manager.get_current_llm()
+        if current_llm:
+            # Créer un nouveau LLM avec les mêmes paramètres mais en mode JSON
+            model_name = fallback_manager.get_current_model_name()
+            return ChatGroq(
+                model_name=model_name,
+                temperature=0,
+                model_kwargs={"response_format": {"type": "json_object"}},
+                groq_api_key=Config.GROQ_API_KEY
+            )
+    
+    # Fallback sur le LLM JSON principal
+    return llm_json_mode
 
 def Rewrite_query(query: str) -> str:
     """Rewrite the query to be more specific."""
@@ -136,9 +192,13 @@ def Rewrite_query(query: str) -> str:
         rewritting_prompt_formatted = prompt["Rewritting_prompt"].format(query=query)
         
         def _call_llm():
-            return local_llm.invoke([HumanMessage(content=rewritting_prompt_formatted)])
+            llm = get_llm_with_fallback()
+            return llm.invoke([HumanMessage(content=rewritting_prompt_formatted)])
         
-        generation = retry_with_backoff(_call_llm)
+        generation = retry_with_backoff_advanced(
+            _call_llm,
+            circuit_breaker=llm_circuit_breaker
+        )
         
         if hasattr(generation, "content"):
             return generation.content
@@ -262,6 +322,7 @@ class GraphState(TypedDict):
     error_history: List[str]  # Nouveau : historique des erreurs
     conversation_id: Optional[str]  # ID de conversation pour métriques
     latencies: Optional[Dict[str, float]]  # Latences pour métriques
+    answer_quality_scores: Optional[Dict]  # Scores de qualité de la réponse
 
 # Reranker global (lazy loading)
 _reranker = None
@@ -485,9 +546,31 @@ def generate(state: Dict) -> Dict:
         )
         
         def _generate():
-            return local_llm.invoke([HumanMessage(content=rag_prompt_formatted)])
+            llm = get_llm_with_fallback()
+            return llm.invoke([HumanMessage(content=rag_prompt_formatted)])
         
-        generation = retry_with_backoff(_generate)
+        try:
+            generation = retry_with_backoff_advanced(
+                _generate,
+                circuit_breaker=llm_circuit_breaker
+            )
+        except MaxRetriesException as e:
+            # Essayer avec le modèle de fallback suivant
+            if fallback_manager and fallback_manager.try_next_model():
+                print(f"[FALLBACK] Tentative avec modèle: {fallback_manager.get_current_model_name()}")
+                try:
+                    generation = retry_with_backoff_advanced(
+                        _generate,
+                        circuit_breaker=llm_circuit_breaker
+                    )
+                except Exception:
+                    # Réinitialiser au modèle principal
+                    fallback_manager.reset()
+                    raise
+            else:
+                if fallback_manager:
+                    fallback_manager.reset()
+                raise
         
         if not generation:
             raise InvalidResponseException("Réponse vide du LLM")
@@ -541,6 +624,125 @@ def generate(state: Dict) -> Dict:
         from src.core.exceptions import GenerationException
         raise GenerationException(error_msg) from e
 
+def generate_stream(state: Dict, stream_callback=None):
+    """
+    Génère une réponse avec streaming token par token.
+    
+    Args:
+        state: État du graph
+        stream_callback: Fonction callback appelée pour chaque chunk (chunk: str) -> None
+    
+    Returns:
+        Dict avec la génération complète
+    """
+    start_time = time.time()
+    conversation_id = state.get("conversation_id", "unknown")
+    latencies = state.get("latencies", {})
+    
+    try:
+        logger.info("Generation with streaming started", extra={"component": "generation", "conversation_id": conversation_id})
+        print("---GENERATE (STREAMING)---")
+        
+        if not state.get("documents"):
+            raise GenerationException("Aucun document disponible pour la génération")
+        
+        # Vérifier si les citations sont activées
+        citations_enabled = getattr(Config, 'CITATIONS_ENABLED', True)
+        
+        # Formater les documents
+        docs_txt = format_docs(state["documents"], with_citations=citations_enabled)
+        rag_prompt_formatted = prompt["rag_prompt"].format(
+            context=docs_txt, 
+            question=state["question"]
+        )
+        
+        # Accumulateur pour la réponse complète
+        full_response = ""
+        
+        # Streamer la réponse
+        def _generate_stream():
+            llm = get_llm_with_fallback()
+            return llm.stream([HumanMessage(content=rag_prompt_formatted)])
+        
+        try:
+            stream = _generate_stream()
+            
+            for chunk in stream:
+                if hasattr(chunk, 'content') and chunk.content:
+                    chunk_text = chunk.content
+                    full_response += chunk_text
+                    
+                    # Appeler le callback si fourni
+                    if stream_callback:
+                        stream_callback(chunk_text)
+            
+            # Traiter les citations si activées
+            if citations_enabled:
+                sources = extract_sources_from_documents(state["documents"])
+                full_response, references = format_citations(full_response, sources)
+                
+                # Streamer les références aussi
+                if references:
+                    if stream_callback:
+                        stream_callback(references)
+                    full_response = full_response + references
+            
+        except Exception as stream_error:
+            # Fallback sur génération non-streaming en cas d'erreur
+            print(f"⚠️ Erreur streaming, fallback sur génération normale: {str(stream_error)}")
+            logger.warning(
+                "Streaming failed, falling back to non-streaming",
+                extra={"component": "generation", "conversation_id": conversation_id, "error": str(stream_error)}
+            )
+            
+            def _generate():
+                llm = get_llm_with_fallback()
+                return llm.invoke([HumanMessage(content=rag_prompt_formatted)])
+            
+            generation = retry_with_backoff_advanced(
+                _generate,
+                circuit_breaker=llm_circuit_breaker
+            )
+            full_response = generation.content if hasattr(generation, 'content') else str(generation)
+            
+            # Traiter les citations
+            if citations_enabled:
+                sources = extract_sources_from_documents(state["documents"])
+                full_response, references = format_citations(full_response, sources)
+                if references:
+                    full_response = full_response + references
+        
+        elapsed_time = time.time() - start_time
+        latencies["generation"] = elapsed_time
+        
+        logger.info(
+            "Generation with streaming completed",
+            extra={
+                "component": "generation",
+                "conversation_id": conversation_id,
+                "data": {"latency": elapsed_time, "citations_enabled": citations_enabled}
+            }
+        )
+        
+        return {
+            "generation": full_response,
+            "loop_step": state.get("loop_step", 0) + 1,
+            "latencies": latencies
+        }
+        
+    except Exception as e:
+        elapsed_time = time.time() - start_time
+        latencies["generation"] = elapsed_time
+        error_msg = f"Erreur lors de la génération avec streaming: {str(e)}"
+        print(f"❌ {error_msg}")
+        logger.error(
+            "Generation with streaming failed",
+            extra={"component": "generation", "conversation_id": conversation_id},
+            exc_info=True
+        )
+        from src.core.exceptions import GenerationException
+        raise GenerationException(error_msg) from e
+
 
 def grade_documents(state: Dict) -> Dict:
     """Grade the relevance of retrieved documents using multi-criteria evaluation."""
@@ -575,12 +777,16 @@ def grade_documents(state: Dict) -> Dict:
                     )
                     
                     def _grade():
-                        return llm_json_mode.invoke(
+                        llm = get_llm_json_with_fallback()
+                        return llm.invoke(
                             [SystemMessage(content=prompt["multi_criteria_grader_instructions"])] +
                             [HumanMessage(content=grader_prompt_formatted)]
                         )
                     
-                    result = retry_with_backoff(_grade)
+                    result = retry_with_backoff_advanced(
+                        _grade,
+                        circuit_breaker=llm_circuit_breaker
+                    )
                     
                     try:
                         grade_data = json.loads(result.content)
@@ -651,12 +857,16 @@ def grade_documents(state: Dict) -> Dict:
                     )
                     
                     def _grade():
-                        return llm_json_mode.invoke(
+                        llm = get_llm_json_with_fallback()
+                        return llm.invoke(
                             [SystemMessage(content=prompt["doc_grader_instructions"])] +
                             [HumanMessage(content=doc_grader_prompt_formatted)]
                         )
                     
-                    result = retry_with_backoff(_grade)
+                    result = retry_with_backoff_advanced(
+                        _grade,
+                        circuit_breaker=llm_circuit_breaker
+                    )
                     
                     try:
                         grade_data = json.loads(result.content)
@@ -725,7 +935,11 @@ def web_search(state: Dict) -> Dict:
         def _search():
             return web_search_tool.invoke({"query": state["question"]})
         
-        docs = retry_with_backoff(_search, max_retries=2)
+        docs = retry_with_backoff_advanced(
+            _search,
+            max_retries=2,
+            circuit_breaker=web_search_circuit_breaker
+        )
         
         if not docs:
             print("⚠️ Aucun résultat de recherche web")
@@ -778,12 +992,16 @@ def route_question(state: Dict) -> str:
         print("---ROUTE QUESTION---")
         
         def _route():
-            return llm_json_mode.invoke(
+            llm = get_llm_json_with_fallback()
+            return llm.invoke(
                 [SystemMessage(content=prompt["router_instructions"])] +
                 [HumanMessage(content=state["question"])]
             )
         
-        route_result = retry_with_backoff(_route)
+        route_result = retry_with_backoff_advanced(
+            _route,
+            circuit_breaker=llm_circuit_breaker
+        )
         
         try:
             route_data = json.loads(route_result.content)
@@ -830,12 +1048,16 @@ def grade_generation_v_documents_and_question(state: Dict) -> str:
             )
             
             def _check_hallucination():
-                return llm_json_mode.invoke(
+                llm = get_llm_json_with_fallback()
+                return llm.invoke(
                     [SystemMessage(content=prompt["hallucination_grader_instructions"])] +
                     [HumanMessage(content=hallucination_grader_prompt_formatted)]
                 )
             
-            result = retry_with_backoff(_check_hallucination)
+            result = retry_with_backoff_advanced(
+                _check_hallucination,
+                circuit_breaker=llm_circuit_breaker
+            )
             
             try:
                 grade_data = json.loads(result.content)
@@ -847,6 +1069,15 @@ def grade_generation_v_documents_and_question(state: Dict) -> str:
             if grade != "yes":
                 if loop_step < max_retries:
                     print(f"---DECISION: GENERATION NOT GROUNDED, RETRYING ({loop_step + 1}/{max_retries})---")
+                    # Appliquer stratégie de recovery pour hallucinations
+                    if getattr(Config, 'RECOVERY_STRATEGY_ENABLED', True):
+                        try:
+                            current_llm = get_llm_with_fallback()
+                            state = RecoveryStrategy.handle_hallucination(state, current_llm)
+                        except Exception as e:
+                            print(f"⚠️ Erreur lors de l'application de la stratégie de recovery: {str(e)}")
+                    
+                   
                     return "not supported"
                 else:
                     print("---DECISION: MAX RETRIES REACHED---")
@@ -869,12 +1100,16 @@ def grade_generation_v_documents_and_question(state: Dict) -> str:
             )
             
             def _check_useful():
-                return llm_json_mode.invoke(
+                llm = get_llm_json_with_fallback()
+                return llm.invoke(
                     [SystemMessage(content=prompt["answer_grader_instructions"])] +
                     [HumanMessage(content=answer_grader_prompt_formatted)]
                 )
             
-            result = retry_with_backoff(_check_useful)
+            result = retry_with_backoff_advanced(
+                _check_useful,
+                circuit_breaker=llm_circuit_breaker
+            )
             
             try:
                 grade_data = json.loads(result.content)
@@ -883,7 +1118,17 @@ def grade_generation_v_documents_and_question(state: Dict) -> str:
                 print("⚠️ Erreur parsing JSON answer. Par défaut: no")
                 grade = "no"
             
-            return "useful" if grade == "yes" else "not useful"
+            if grade == "yes":
+                return "useful"
+            else:
+                # Appliquer stratégie de recovery pour "not useful"
+                if getattr(Config, 'RECOVERY_STRATEGY_ENABLED', True):
+                    try:
+                        state = RecoveryStrategy.handle_not_useful(state)
+                    except Exception as e:
+                        print(f"⚠️ Erreur lors de l'application de la stratégie de recovery: {str(e)}")
+                
+                return "not useful"
         except Exception as e:
             print(f"⚠️ Erreur vérification utilité: {str(e)}. Par défaut: not useful")
             return "not useful"
@@ -894,12 +1139,145 @@ def grade_generation_v_documents_and_question(state: Dict) -> str:
         return "max retries"  # Sécurité: arrêt en cas d'erreur
 
 
+def grade_answer_quality(state: Dict) -> Dict:
+    """Évalue la qualité de la réponse générée sur 5 critères."""
+    start_time = time.time()
+    conversation_id = state.get("conversation_id", "unknown")
+    latencies = state.get("latencies", {})
+    
+    try:
+        logger.info("Answer quality scoring started", extra={"component": "answer_quality", "conversation_id": conversation_id})
+        print("---ANSWER QUALITY SCORING---")
+        
+        # Vérifier si activé
+        quality_scoring_enabled = getattr(Config, 'ANSWER_QUALITY_SCORING_ENABLED', True)
+        if not quality_scoring_enabled:
+            elapsed_time = time.time() - start_time
+            latencies["answer_quality"] = elapsed_time
+            return {"answer_quality_scores": None, "latencies": latencies}
+        
+        if not state.get("generation"):
+            elapsed_time = time.time() - start_time
+            latencies["answer_quality"] = elapsed_time
+            return {"answer_quality_scores": None, "latencies": latencies}
+        
+        # Extraire le contenu de la réponse
+        generation_content = state["generation"].content if hasattr(state["generation"], "content") else str(state["generation"])
+        
+        # Formater les documents pour le contexte
+        context = format_docs(state.get("documents", []), with_citations=False)
+        
+        # Préparer le prompt
+        quality_prompt_formatted = prompt["answer_quality_scorer_prompt"].format(
+            question=state["question"],
+            answer=generation_content[:4000],  # Limiter la longueur
+            context=context[:3000]  # Limiter le contexte
+        )
+        
+        def _score_quality():
+            llm = get_llm_json_with_fallback()
+            return llm.invoke(
+                [SystemMessage(content=prompt["answer_quality_scorer_instructions"])] +
+                [HumanMessage(content=quality_prompt_formatted)]
+            )
+        
+        result = retry_with_backoff_advanced(
+            _score_quality,
+            circuit_breaker=llm_circuit_breaker
+        )
+        
+        try:
+            quality_data = json.loads(result.content)
+            
+            # Extraire les scores
+            scores = quality_data.get("scores", {})
+            relevance = float(scores.get("relevance", 0.0))
+            completeness = float(scores.get("completeness", 0.0))
+            conciseness = float(scores.get("conciseness", 0.0))
+            accuracy = float(scores.get("accuracy", 0.0))
+            coherence = float(scores.get("coherence", 0.0))
+            
+            # Calculer le score pondéré
+            relevance_weight = getattr(Config, 'ANSWER_QUALITY_RELEVANCE_WEIGHT', 0.30)
+            completeness_weight = getattr(Config, 'ANSWER_QUALITY_COMPLETENESS_WEIGHT', 0.25)
+            conciseness_weight = getattr(Config, 'ANSWER_QUALITY_CONCISENESS_WEIGHT', 0.15)
+            accuracy_weight = getattr(Config, 'ANSWER_QUALITY_ACCURACY_WEIGHT', 0.20)
+            coherence_weight = getattr(Config, 'ANSWER_QUALITY_COHERENCE_WEIGHT', 0.10)
+            
+            overall_score = (
+                relevance * relevance_weight +
+                completeness * completeness_weight +
+                conciseness * conciseness_weight +
+                accuracy * accuracy_weight +
+                coherence * coherence_weight
+            )
+            
+            # Vérifier le seuil d'acceptation
+            threshold = getattr(Config, 'ANSWER_QUALITY_ACCEPTANCE_THRESHOLD', 0.65)
+            accepted = overall_score >= threshold
+            
+            quality_scores = {
+                "relevance": relevance,
+                "completeness": completeness,
+                "conciseness": conciseness,
+                "accuracy": accuracy,
+                "coherence": coherence,
+                "overall_score": overall_score,
+                "accepted": accepted,
+                "reasoning": quality_data.get("reasoning", "No reasoning provided")
+            }
+            
+            print(f"📊 Answer Quality Scores:")
+            print(f"   Relevance: {relevance:.2f}")
+            print(f"   Completeness: {completeness:.2f}")
+            print(f"   Conciseness: {conciseness:.2f}")
+            print(f"   Accuracy: {accuracy:.2f}")
+            print(f"   Coherence: {coherence:.2f}")
+            print(f"   Overall Score: {overall_score:.2f} ({'✅ Accepted' if accepted else '❌ Below threshold'})")
+            
+            elapsed_time = time.time() - start_time
+            latencies["answer_quality"] = elapsed_time
+            
+            logger.info(
+                "Answer quality scoring completed",
+                extra={
+                    "component": "answer_quality",
+                    "conversation_id": conversation_id,
+                    "data": {
+                        "latency": elapsed_time,
+                        "overall_score": overall_score,
+                        "accepted": accepted
+                    }
+                }
+            )
+            
+            return {"answer_quality_scores": quality_scores, "latencies": latencies}
+            
+        except json.JSONDecodeError as e:
+            print(f"⚠️ Erreur parsing JSON answer quality: {str(e)}")
+            elapsed_time = time.time() - start_time
+            latencies["answer_quality"] = elapsed_time
+            return {"answer_quality_scores": None, "latencies": latencies}
+            
+    except Exception as e:
+        elapsed_time = time.time() - start_time
+        latencies["answer_quality"] = elapsed_time
+        print(f"❌ Erreur dans grade_answer_quality: {str(e)}")
+        logger.error(
+            "Answer quality scoring failed",
+            extra={"component": "answer_quality", "conversation_id": conversation_id},
+            exc_info=True
+        )
+        return {"answer_quality_scores": None, "latencies": latencies}
+
+
 # Workflow definition and graph compilation
 workflow = StateGraph(GraphState)
 workflow.add_node("websearch", web_search)
 workflow.add_node("retrieve", retrieve)
 workflow.add_node("grade_documents", grade_documents)
 workflow.add_node("generate", generate)
+workflow.add_node("grade_answer_quality", grade_answer_quality)
 
 workflow.set_conditional_entry_point(
     route_question,
@@ -912,8 +1290,9 @@ workflow.add_conditional_edges(
     decide_to_generate,
     {"websearch": "websearch", "generate": "generate"},
 )
+workflow.add_edge("generate", "grade_answer_quality")
 workflow.add_conditional_edges(
-    "generate",
+    "grade_answer_quality",
     grade_generation_v_documents_and_question,
     {"not supported": "generate", "useful": END, "not useful": "websearch", "max retries": END},
 )
@@ -987,13 +1366,16 @@ def get_final_response(query: str) -> str:
         
         # Enregistrer les métriques
         if getattr(Config, 'METRICS_ENABLED', True):
+            answer_quality_scores = final_state.get("answer_quality_scores")
             metrics.record_request(
                 conversation_id=conversation_id,
                 query=query,
                 latencies=latencies,
                 success=True,
                 num_documents=len(final_state.get("documents", [])),
-                response_length=len(response) if response else 0
+                response_length=len(response) if response else 0,
+                answer_quality_score=answer_quality_scores.get("overall_score") if answer_quality_scores else None,
+                answer_quality_scores=answer_quality_scores
             )
         
         logger.info(
@@ -1130,3 +1512,167 @@ def get_final_response(query: str) -> str:
         )
         
         raise
+
+def get_final_response_stream(query: str):
+    """
+    Point d'entrée principal pour obtenir une réponse RAG avec streaming.
+    Retourne un générateur qui yield les chunks de la réponse.
+    
+    Args:
+        query: Question de l'utilisateur
+    
+    Yields:
+        str: Chunks de la réponse au fur et à mesure de la génération
+    """
+    conversation_id = str(uuid.uuid4())
+    trace_id = str(uuid.uuid4())
+    
+    # Début de la mesure end-to-end
+    start_time = time.time()
+    latencies = {}
+    
+    try:
+        logger.info(
+            "Streaming request started",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id,
+                "data": {"query": query[:100]}
+            }
+        )
+        
+        if not query or not query.strip():
+            yield "⚠️ Veuillez fournir une question valide."
+            return
+        
+        # Réécriture de la requête
+        try:
+            rewritten_query = Rewrite_query(query)
+        except Exception as e:
+            print(f"⚠️ Erreur réécriture, utilisation query originale: {str(e)}")
+            rewritten_query = query
+        
+        # Initialisation de l'état
+        max_retries = getattr(Config, 'MAX_RETRIES', 3)
+        initial_state = GraphState(
+            question=rewritten_query,
+            generation="",
+            web_search="No",
+            max_retries=max_retries,
+            answers=0,
+            loop_step=0,
+            documents=[],
+            error_history=[],
+            conversation_id=conversation_id,
+            latencies=latencies
+        )
+        
+        # Exécuter le workflow jusqu'à la génération
+        # On doit exécuter manuellement les étapes jusqu'à generate
+        current_state = initial_state
+        
+        # Route question
+        route = route_question(current_state)
+        if route == "websearch":
+            current_state = web_search(current_state)
+        else:
+            current_state = retrieve(current_state)
+            current_state = grade_documents(current_state)
+            
+            # Décider si on fait web search
+            if current_state.get("web_search") == "Yes":
+                current_state = web_search(current_state)
+        
+        # Maintenant on génère avec streaming
+        # Utiliser generate_stream avec callback
+        # Note: On doit adapter car generate_stream attend un callback, pas un générateur
+        # Solution: créer un wrapper qui yield les chunks
+        
+        chunks_received = []
+        
+        def stream_callback_wrapper(chunk: str):
+            """Wrapper pour collecter les chunks."""
+            chunks_received.append(chunk)
+        
+        # Générer avec streaming
+        generation_state = generate_stream(current_state, stream_callback=stream_callback_wrapper)
+        
+        # Yielder tous les chunks
+        for chunk in chunks_received:
+            yield chunk
+        
+        # Mettre à jour l'état final
+        final_state = generation_state
+        
+        # Continuer avec le grading (sans streaming)
+        # Note: Le grading et quality scoring ne stream pas
+        try:
+            grade_result = grade_generation_v_documents_and_question(final_state)
+            if grade_result == "useful":
+                # Succès
+                pass
+            elif grade_result == "not supported" and final_state.get("loop_step", 0) < max_retries:
+                # Retry (ne devrait pas arriver souvent avec streaming)
+                print("⚠️ Retry nécessaire après streaming")
+        except Exception as e:
+            print(f"⚠️ Erreur lors du grading: {str(e)}")
+        
+        # Exécuter le quality scoring aussi
+        try:
+            final_state = grade_answer_quality(final_state)
+        except Exception as e:
+            print(f"⚠️ Erreur lors du quality scoring: {str(e)}")
+        
+        # Récupérer les latences
+        latencies = final_state.get("latencies", latencies)
+        latencies["end_to_end"] = time.time() - start_time
+        
+        # Enregistrer les métriques
+        if getattr(Config, 'METRICS_ENABLED', True):
+            answer_quality_scores = final_state.get("answer_quality_scores")
+            metrics.record_request(
+                conversation_id=conversation_id,
+                query=query,
+                latencies=latencies,
+                success=True,
+                num_documents=len(final_state.get("documents", [])),
+                response_length=len(full_response) if full_response else 0,
+                answer_quality_score=answer_quality_scores.get("overall_score") if answer_quality_scores else None,
+                answer_quality_scores=answer_quality_scores
+            )
+        
+        logger.info(
+            "Streaming request completed",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id,
+                "data": {"latency": latencies["end_to_end"]}
+            }
+        )
+        
+    except Exception as e:
+        latencies["end_to_end"] = time.time() - start_time
+        error_msg = f"⚠️ Erreur lors de la génération: {str(e)}"
+        yield error_msg
+        
+        if getattr(Config, 'METRICS_ENABLED', True):
+            metrics.record_request(
+                conversation_id=conversation_id,
+                query=query,
+                latencies=latencies,
+                success=False,
+                error=str(e)
+            )
+        
+        logger.error(
+            "Streaming request failed",
+            extra={
+                "component": "rag",
+                "conversation_id": conversation_id,
+                "trace_id": trace_id,
+                "data": {"error": str(e)}
+            },
+            exc_info=True
+        )
