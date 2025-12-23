@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG System - Advanced Retrieval-Augmented Generation Platform</title>
+    <script>
+        tailwind.config = { darkMode: 'class' };
+    </script>
+    <script>
+        function toggleTheme() {
+            const html = document.documentElement;
+            const isDark = html.classList.contains('dark');
+            if (isDark) {
+                html.classList.remove('dark');
+                localStorage.setItem('theme', 'light');
+                updateThemeToggleUI(false);
+            } else {
+                html.classList.add('dark');
+                localStorage.setItem('theme', 'dark');
+                updateThemeToggleUI(true);
+            }
+        }
+        function updateThemeToggleUI(isDark) {
+            const btn = document.getElementById('theme-toggle-btn');
+            const on = document.getElementById('theme-indicator-on');
+            const off = document.getElementById('theme-indicator-off');
+            if (!btn) return;
+            if (isDark) {
+                on.className = 'text-[0.65rem] px-2 py-0.5 rounded-full bg-white text-neutral-900 shadow-sm transition-all';
+                off.className = 'text-[0.65rem] px-2 py-0.5 rounded-full text-neutral-500 transition-all';
+                btn.className = 'inline-flex items-center rounded-full bg-neutral-800 px-1 py-0.5 border border-neutral-300 dark:border-white/10 cursor-pointer transition-colors';
+            } else {
+                on.className = 'text-[0.65rem] px-2 py-0.5 rounded-full text-neutral-500 transition-all';
+                off.className = 'text-[0.65rem] px-2 py-0.5 rounded-full bg-white text-neutral-900 shadow-sm transition-all';
+                btn.className = 'inline-flex items-center rounded-full bg-neutral-200 px-1 py-0.5 border border-neutral-300 dark:border-white/10 cursor-pointer transition-colors';
+            }
+        }
+        (function () {
+            const saved = localStorage.getItem('theme');
+            const html = document.documentElement;
+            if (saved === 'dark') {
+                html.classList.add('dark');
+                updateThemeToggleUI(true);
+            } else {
+                html.classList.remove('dark');
+                updateThemeToggleUI(false);
+            }
+        })();
+    </script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Oswald:wght@400;500;600&family=Space+Grotesk:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        .font-oswald { font-family: 'Oswald', sans-serif; }
+        .font-space { font-family: 'Space Grotesk', sans-serif; }
+        .font-inter { font-family: 'Inter', sans-serif; }
+        ::-webkit-scrollbar { display: none; }
+        body { -ms-overflow-style: none; scrollbar-width: none; }
+        .transition-all-300 { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+        .fade-in { animation: fadeIn 0.5s ease-out forwards; }
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+    </style>
+    <script>
+        function toggleLoginModal() {
+            const modal = document.getElementById('login-modal');
+            const backdrop = document.getElementById('login-backdrop');
+            const card = document.getElementById('login-card');
+            const errorBox = document.getElementById('login-error');
+            if (!modal || !backdrop || !card) return;
+            const isHidden = modal.classList.contains('hidden');
+            if (isHidden) {
+                modal.classList.remove('hidden');
+                setTimeout(function () {
+                    backdrop.classList.remove('opacity-0');
+                    backdrop.classList.add('opacity-100');
+                    card.classList.remove('opacity-0', 'scale-95');
+                    card.classList.add('opacity-100', 'scale-100');
+                }, 10);
+                if (errorBox) { errorBox.classList.add('hidden'); }
+            } else {
+                backdrop.classList.remove('opacity-100');
+                backdrop.classList.add('opacity-0');
+                card.classList.remove('opacity-100', 'scale-100');
+                card.classList.add('opacity-0', 'scale-95');
+                setTimeout(function () { modal.classList.add('hidden'); }, 200);
+            }
+        }
+        function showLoginError() {
+            const errorBox = document.getElementById('login-error');
+            if (errorBox) { errorBox.classList.remove('hidden'); }
+        }
+        function handleLogin(event) {
+            event.preventDefault();
+            const usernameInput = document.getElementById('username-input');
+            const passwordInput = document.getElementById('password-input');
+            const username = usernameInput ? usernameInput.value.trim() : '';
+            const password = passwordInput ? passwordInput.value.trim() : '';
+            if (username === 'admin' && password === 'admin') {
+                localStorage.setItem('rag-auth', 'admin');
+                window.location.href = '/admin/dashboard';
+            } else if (username === 'user' && password === 'user') {
+                localStorage.setItem('rag-auth', 'user');
+                window.location.href = '/chat';
+            } else {
+                showLoginError();
+            }
+        }
+    </script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen antialiased flex flex-col items-center justify-center text-neutral-900 font-inter bg-gray-950 pt-8 pr-4 pb-8 pl-4 relative">
+    
+    <!-- Login Modal -->
+    <div id="login-modal" class="fixed inset-0 z-[100] hidden items-center justify-center flex">
+        <div onclick="toggleLoginModal()" class="absolute inset-0 bg-neutral-900/60 backdrop-blur-sm transition-opacity opacity-0 duration-200" id="login-backdrop"></div>
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-8 relative z-10 transform scale-95 opacity-0 transition-all duration-300 border border-white/20" id="login-card">
+            <button onclick="toggleLoginModal()" class="absolute top-4 right-4 p-2 text-neutral-400 hover:text-neutral-900 rounded-full hover:bg-neutral-100 transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" width="1.25rem" height="1.25rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-x">
+                    <path d="M18 6 6 18"></path>
+                    <path d="m6 6 12 12"></path>
+                </svg>
+            </button>
+            <div class="text-center mb-8">
+                <div class="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-neutral-900 text-white mb-4 shadow-lg shadow-neutral-900/20">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="1.75rem" height="1.75rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-user">
+                        <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path>
+                        <circle cx="12" cy="7" r="4"></circle>
+                    </svg>
+                </div>
+                <h3 class="text-2xl font-oswald font-medium text-neutral-900 tracking-tight">
+                    Bienvenue sur RAG System
+                </h3>
+                <p class="text-base text-neutral-500 mt-2">
+                    Connectez-vous pour accéder à la plateforme
+                </p>
+                <div class="mt-4 p-3 bg-red-50 border border-red-100 rounded-lg hidden" id="login-error">
+                    <div class="flex items-center gap-2 text-red-600">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="0.875rem" height="0.875rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-alert-circle">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <line x1="12" x2="12" y1="8" y2="12"></line>
+                            <line x1="12" x2="12.01" y1="16" y2="16"></line>
+                        </svg>
+                        <span class="text-xs font-medium">
+                            Identifiants invalides. Essayez user/user ou admin/admin
+                        </span>
+                    </div>
+                </div>
+            </div>
+            <form class="space-y-4" onsubmit="handleLogin(event)">
+                <div>
+                    <label class="block text-xs font-semibold text-neutral-700 uppercase tracking-widest mb-1.5">
+                        Utilisateur / Email
+                    </label>
+                    <input type="text" id="username-input" class="w-full px-4 py-3 rounded-lg border border-neutral-200 bg-neutral-50 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:bg-white transition-all placeholder:text-neutral-400" placeholder="admin">
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-neutral-700 uppercase tracking-widest mb-1.5">
+                        Mot de passe
+                    </label>
+                    <input type="password" id="password-input" class="w-full px-4 py-3 rounded-lg border border-neutral-200 bg-neutral-50 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:bg-white transition-all placeholder:text-neutral-400" placeholder="••••••••">
+                    <div class="mt-2 text-right">
+                        <button type="button" onclick="alert('Réinitialisation du mot de passe bientôt disponible.')" class="text-[0.7rem] text-neutral-400 hover:text-neutral-700 underline underline-offset-2">
+                            Mot de passe oublié ?
+                        </button>
+                    </div>
+                </div>
+                <button type="submit" class="w-full py-3.5 bg-neutral-900 text-white rounded-lg text-sm font-semibold uppercase tracking-widest hover:bg-neutral-800 transition-all hover:shadow-lg hover:shadow-neutral-900/20 active:scale-[0.98]">
+                    Se connecter
+                </button>
+            </form>
+            <div class="relative my-8">
+                <div class="absolute inset-0 flex items-center">
+                    <div class="w-full border-t border-neutral-200"></div>
+                </div>
+                <div class="relative flex justify-center text-xs uppercase tracking-wider">
+                    <span class="bg-white px-2 text-neutral-400 font-medium">
+                        Ou continuer avec
+                    </span>
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <button onclick="alert('Connexion Google bientôt disponible')" class="flex items-center justify-center gap-2 px-4 py-2.5 border border-neutral-200 rounded-lg hover:bg-neutral-50 hover:border-neutral-300 transition-all group active:scale-95">
+                    <svg viewBox="0 0 24 24" width="1.125rem" height="1.125rem" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"></path>
+                        <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"></path>
+                        <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"></path>
+                        <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"></path>
+                    </svg>
+                    <span class="text-xs font-semibold text-neutral-600 group-hover:text-neutral-900">Google</span>
+                </button>
+                <button onclick="alert('Connexion Meta bientôt disponible')" class="flex items-center justify-center gap-2 px-4 py-2.5 border border-neutral-200 rounded-lg hover:bg-neutral-50 hover:border-neutral-300 transition-all group active:scale-95">
+                    <svg viewBox="0 0 24 24" width="1.25rem" height="1.25rem" xmlns="http://www.w3.org/2000/svg" fill="#0668E1">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 13.66c-1.33 0-1.92-.61-2.45-1.69l-.16-.36c-.53-1.15-1.07-2.3-2.03-2.3s-1.5.89-2.03 2.3l-.16.36c-.52 1.09-1.12 1.69-2.45 1.69-1.53 0-2.37-1.12-2.37-2.45 0-1.92 1.65-3.65 3.65-3.65.65 0 1.25.17 1.76.5.34.22.69.49 1.01.76l.09.07c.45.39.9.78 1.5.78.6 0 1.05-.39 1.5-.78l.09-.07c.32-.27.67-.54 1.01-.76.51-.33 1.11-.5 1.76-.5 2 0 3.65 1.73 3.65 3.65 0 1.33-.84 2.45-2.37 2.45z"></path>
+                    </svg>
+                    <span class="text-xs font-semibold text-neutral-600 group-hover:text-neutral-900">Meta</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <main id="landing-shell" class="relative w-full xl:max-w-[96rem] bg-[#EAEAEA] xl:rounded-[3rem] shadow-2xl overflow-hidden flex flex-col min-h-screen xl:min-h-[calc(100vh-4rem)]">
+        <div class="absolute inset-0 pointer-events-none opacity-40 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] mix-blend-overlay"></div>
+        <div class="absolute top-0 right-0 w-[50rem] h-[50rem] bg-gradient-to-b from-white/60 to-transparent opacity-50 blur-3xl pointer-events-none rounded-full translate-x-1/3 -translate-y-1/3"></div>
+
+        <!-- Navigation -->
+        <nav class="flex flex-wrap md:px-12 z-30 bg-stone-100 pt-6 pr-6 pb-6 pl-6 relative gap-x-20 gap-y-6 items-center justify-between">
+            <div class="flex items-center gap-3 group cursor-pointer mr-8">
+                <div class="flex text-white bg-neutral-900 w-9 h-9 rounded-lg relative items-center justify-center">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="1.25rem" height="1.25rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-brain">
+                        <path d="M12 5a3 3 0 1 0-5.997.142 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588 4 4 0 0 0 7.636 2.106 3 3 0 0 0 .164-1.857 3 3 0 0 0 .328-1.857 3 3 0 0 0 .068-1.857 4 4 0 0 0-1.325-2.957 4 4 0 0 0-1.592-1.654 4 4 0 0 0-1.558-.339 3 3 0 0 0-1.437.046"></path>
+                    </svg>
+                </div>
+                <div class="flex flex-col">
+                    <span class="uppercase leading-none text-2xl font-medium tracking-tight font-oswald">
+                        RAG
+                        <span class="text-orange-400">SYSTEM</span>
+                    </span>
+                    <span class="text-[0.6rem] uppercase text-neutral-700 tracking-widest font-space">
+                        Retrieval-Augmented Generation
+                    </span>
+                </div>
+            </div>
+
+            <div class="hidden md:flex items-center gap-8 mr-auto">
+                <a href="#features" class="uppercase hover:text-neutral-900 transition-colors text-xs font-semibold text-neutral-600 tracking-widest">FONCTIONNALITÉS</a>
+                <a href="#solutions" class="uppercase hover:text-neutral-900 transition-colors text-xs font-semibold text-neutral-600 tracking-widest">SOLUTIONS</a>
+                <a href="#about" class="uppercase hover:text-neutral-900 transition-colors text-xs font-semibold text-neutral-600 tracking-widest">À PROPOS</a>
+            </div>
+
+            <div class="flex items-center gap-3 ml-auto">
+                <button id="theme-toggle-btn" onclick="toggleTheme()" class="inline-flex items-center rounded-full bg-neutral-200 px-1 py-0.5 border border-neutral-300 cursor-pointer transition-colors">
+                    <span id="theme-indicator-on" class="text-[0.65rem] px-2 py-0.5 rounded-full text-neutral-500 transition-all">ON</span>
+                    <span id="theme-indicator-off" class="text-[0.65rem] px-2 py-0.5 rounded-full bg-white text-neutral-900 shadow-sm transition-all">OFF</span>
+                </button>
+                <button id="auth-btn" onclick="toggleLoginModal()" class="uppercase hover:bg-neutral-800 transition-colors flex shadow-neutral-900/10 text-xs font-semibold text-white tracking-wider bg-neutral-900 rounded-full pt-2 pr-6 pb-2 pl-6 shadow-lg gap-x-2 gap-y-2 items-center">
+                    <span>Se connecter</span>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="0.875rem" height="0.875rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-arrow-right">
+                        <path d="M5 12h14"></path>
+                        <path d="m12 5 7 7-7 7"></path>
+                    </svg>
+                </button>
+            </div>
+        </nav>
+
+        <!-- Landing Content -->
+        <div id="landing-content" class="flex-1 overflow-y-auto bg-zinc-100 z-10 relative">
+            <!-- HERO SECTION -->
+            <section class="md:px-12 md:pb-10 bg-zinc-100 max-w-[90rem] mr-auto ml-auto pt-12 pr-6 pb-24 pl-6">
+                <div class="flex flex-col gap-x-12 gap-y-5">
+                    <div class="grid grid-cols-1 lg:grid-cols-12 lg:gap-16 gap-x-0 gap-y-8 items-start">
+                        <div class="lg:col-span-7 flex flex-col gap-x-8 gap-y-8">
+                            <div class="flex gap-4 animate-fade-in-up gap-x-4 gap-y-4 items-center">
+                                <div class="h-px w-12 bg-neutral-400"></div>
+                                <span class="uppercase text-sm font-medium text-neutral-500 tracking-widest">
+                                    Système RAG de nouvelle génération
+                                </span>
+                            </div>
+                            <h1 class="md:text-8xl lg:text-9xl leading-[0.85] uppercase text-6xl font-medium text-neutral-900 tracking-tight font-oswald pt-8 pb-6">
+                                Intelligence pour l'ère de la
+                                <span class="bg-clip-text text-transparent bg-gradient-to-r from-neutral-600 to-neutral-900">
+                                    Génération Augmentée
+                                </span>
+                            </h1>
+                        </div>
+
+                        <div class="lg:col-span-5 group h-full mt-1 relative">
+                            <div class="absolute inset-0 bg-neutral-900 rounded-2xl rotate-3 opacity-10 group-hover:rotate-6 transition-transform duration-500"></div>
+                            <div class="relative rounded-2xl overflow-hidden shadow-2xl h-[27.5rem] lg:h-[34.375rem] w-full bg-gradient-to-br from-blue-500 to-purple-600">
+                                <div class="absolute inset-0 flex items-center justify-center">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="12rem" height="12rem" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-brain opacity-20">
+                                        <path d="M12 5a3 3 0 1 0-5.997.142 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588 4 4 0 0 0 7.636 2.106 3 3 0 0 0 .164-1.857 3 3 0 0 0 .328-1.857 3 3 0 0 0 .068-1.857 4 4 0 0 0-1.325-2.957 4 4 0 0 0-1.592-1.654 4 4 0 0 0-1.558-.339 3 3 0 0 0-1.437.046"></path>
+                                    </svg>
+                                </div>
+                                <div class="bg-gradient-to-t from-neutral-900/40 to-transparent absolute top-0 right-0 bottom-0 left-0"></div>
+                                <div class="absolute bottom-6 left-6 right-6 p-4 bg-white/10 backdrop-blur-md rounded-xl border border-white/20 text-white">
+                                    <div class="flex justify-between items-center mb-2">
+                                        <span class="text-[0.65rem] uppercase tracking-widest font-space">
+                                            Analyse du Système
+                                        </span>
+                                        <span class="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></span>
+                                    </div>
+                                    <div class="h-1 w-full bg-white/20 rounded-full overflow-hidden">
+                                        <div class="h-full bg-white w-2/3 animate-[pulse_2s_infinite]"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="flex flex-col lg:flex-row mt-4 gap-x-12 gap-y-12 items-start">
+                        <div class="max-w-2xl">
+                            <h2 class="md:text-2xl leading-tight -mt-6 md:-mt-12 text-xl font-medium text-neutral-800 tracking-tight font-space mb-6">
+                                RAG System n'est pas qu'une technologie. C'est un partenaire stratégique pour les entreprises qui comprennent que l'avenir de l'IA conversationnelle repose sur la précision et la traçabilité des réponses.
+                            </h2>
+                            <div class="mt-8 flex gap-4">
+                                <button onclick="toggleLoginModal()" class="group relative px-8 py-4 bg-neutral-900 text-white rounded-lg overflow-hidden transition-all hover:shadow-xl hover:shadow-neutral-500/20">
+                                    <span class="z-10 flex items-center gap-2 uppercase text-sm font-semibold tracking-widest relative">
+                                        ACCÉDER À LA PLATEFORME
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="1rem" height="1rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-arrow-right group-hover:translate-x-1 transition-transform">
+                                            <path d="M5 12h14"></path>
+                                            <path d="m12 5 7 7-7 7"></path>
+                                        </svg>
+                                    </span>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="w-full lg:w-5/12 ml-auto overflow-hidden bg-neutral-950 border-neutral-200 border rounded-2xl pt-6 pr-6 pl-6 relative shadow-sm">
+                            <div class="absolute top-0 right-0 p-4 opacity-10">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="7.5rem" height="7.5rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="w-[7.5rem] h-[7.5rem]" style="color: rgb(251, 146, 60)">
+                                    <circle cx="12" cy="12" r="10"></circle>
+                                    <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"></path>
+                                    <path d="M2 12h20"></path>
+                                </svg>
+                            </div>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div class="bg-gray-50 border-neutral-100 border rounded-xl pt-4 pr-4 pb-4 pl-4">
+                                    <div class="uppercase text-xs text-neutral-400 font-space mb-1">
+                                        Précision
+                                    </div>
+                                    <div class="text-3xl font-medium text-neutral-900 font-oswald">
+                                        +95%
+                                    </div>
+                                    <div class="text-[0.6rem] text-green-600 mt-2 flex items-center gap-1">
+                                        <svg width="0.625rem" height="0.625rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                            <path d="m18 15-6-6-6 6"></path>
+                                        </svg>
+                                        vs Base LLM
+                                    </div>
+                                </div>
+                                <div class="p-4 bg-neutral-50 rounded-xl border border-neutral-100">
+                                    <div class="text-xs font-space uppercase text-neutral-400 mb-1">
+                                        Latence
+                                    </div>
+                                    <div class="text-3xl font-oswald font-medium text-neutral-900">
+                                        &lt;3s
+                                    </div>
+                                    <div class="text-[0.6rem] text-green-600 mt-2 flex items-center gap-1">
+                                        <svg width="0.625rem" height="0.625rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                            <path d="m18 15-6-6-6 6"></path>
+                                        </svg>
+                                        Temps moyen
+                                    </div>
+                                </div>
+                                <div class="col-span-2 text-white bg-neutral-900 rounded-xl pt-4 pr-4 pb-4 pl-4">
+                                    <div class="flex justify-between items-center mb-4">
+                                        <span class="uppercase text-xs text-orange-500 tracking-widest font-space">
+                                            État du Système
+                                        </span>
+                                        <span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                                    </div>
+                                    <div class="space-y-2 font-mono text-[0.65rem] text-neutral-400">
+                                        <div class="flex justify-between">
+                                            <span>&gt; RAG Engine</span>
+                                            <span class="text-white">Actif</span>
+                                        </div>
+                                        <div class="flex justify-between">
+                                            <span>&gt; Vector Store</span>
+                                            <span class="text-white">En ligne</span>
+                                        </div>
+                                        <div class="flex justify-between">
+                                            <span>&gt; LLM Provider</span>
+                                            <span class="text-emerald-400">98.5% Uptime</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- PROBLEM VS SOLUTION SECTION -->
+            <section id="features" class="bg-white border-neutral-200 border-top pt-14 pb-10">
+                <div class="md:px-12 max-w-7xl mr-auto ml-auto pr-6 pl-6">
+                    <div class="flex flex-col md:flex-row mb-16 gap-x-8 gap-y-8 items-end justify-between">
+                        <div class="max-w-xl">
+                            <span class="text-xs font-semibold text-red-600 uppercase tracking-widest mb-2 block">
+                                Le Défi Actuel
+                            </span>
+                            <h3 class="md:text-5xl text-4xl font-medium text-neutral-900 tracking-tight font-oswald">
+                                Des LLM aux systèmes RAG intelligents
+                            </h3>
+                            <p class="leading-relaxed text-neutral-600 mt-4">
+                                Les modèles de langage traditionnels sont limités par leur connaissance statique. La technologie RAG révolutionne l'accès à l'information en combinant recherche contextuelle et génération intelligente.
+                            </p>
+                        </div>
+                        <div class="flex gap-2">
+                            <div class="bg-neutral-200 w-12 h-1 rounded-full"></div>
+                            <div class="w-12 h-1 bg-neutral-900 rounded-full"></div>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-24">
+                        <div class="p-8 bg-neutral-50 rounded-2xl border border-neutral-100 hover:border-neutral-300 transition-colors group">
+                            <div class="w-10 h-10 bg-red-100 text-red-600 rounded-lg flex items-center justify-center mb-6 group-hover:bg-red-600 group-hover:text-white transition-colors">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="1.25rem" height="1.25rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-alert-triangle">
+                                    <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"></path>
+                                    <path d="M12 9v4"></path>
+                                    <path d="M12 17h.01"></path>
+                                </svg>
+                            </div>
+                            <h4 class="text-lg font-semibold font-oswald uppercase mb-3">
+                                Hallucinations
+                            </h4>
+                            <p class="text-base text-neutral-600 leading-relaxed">
+                                Les LLM génèrent souvent des informations incorrectes ou inventées, créant un risque de désinformation et de perte de confiance.
+                            </p>
+                        </div>
+
+                        <div class="p-8 bg-neutral-50 rounded-2xl border border-neutral-100 hover:border-neutral-300 transition-colors group">
+                            <div class="w-10 h-10 bg-orange-100 text-orange-600 rounded-lg flex items-center justify-center mb-6 group-hover:bg-orange-600 group-hover:text-white transition-colors">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="1.25rem" height="1.25rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-clock">
+                                    <circle cx="12" cy="12" r="10"></circle>
+                                    <polyline points="12 6 12 12 16 14"></polyline>
+                                </svg>
+                            </div>
+                            <h4 class="text-lg font-semibold font-oswald uppercase mb-3">
+                                Connaissances Obsolètes
+                            </h4>
+                            <p class="text-base text-neutral-600 leading-relaxed">
+                                Les modèles statiques ne peuvent pas accéder à des informations récentes ou spécifiques à votre organisation, limitant leur utilité.
+                            </p>
+                        </div>
+
+                        <div class="p-8 bg-neutral-50 rounded-2xl border border-neutral-100 hover:border-neutral-300 transition-colors group">
+                            <div class="w-10 h-10 bg-neutral-200 text-neutral-600 rounded-lg flex items-center justify-center mb-6 group-hover:bg-neutral-900 group-hover:text-white transition-colors">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="1.25rem" height="1.25rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-shield-alert">
+                                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"></path>
+                                    <path d="M12 8v4"></path>
+                                    <path d="M12 16h.01"></path>
+                                </svg>
+                            </div>
+                            <h4 class="text-lg font-semibold font-oswald uppercase mb-3">
+                                Manque de Traçabilité
+                            </h4>
+                            <p class="text-base text-neutral-600 leading-relaxed">
+                                Impossible de vérifier la source des informations générées, créant des risques pour la conformité et la crédibilité.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div id="solutions" class="md:p-12 overflow-hidden text-white bg-neutral-900 rounded-3xl pt-8 pr-8 pb-8 pl-8 relative">
+                        <div class="blur-[6.25rem] bg-blue-500/10 w-96 h-96 rounded-full absolute top-0 right-0"></div>
+
+                        <div class="relative z-10 mb-12">
+                            <span class="uppercase block text-xs font-semibold text-blue-400 tracking-widest mb-2">
+                                La Solution RAG
+                            </span>
+                            <h3 class="md:text-5xl text-3xl font-medium tracking-tight font-oswald">
+                                Architecture de Génération Augmentée
+                            </h3>
+                        </div>
+
+                        <div class="grid grid-cols-1 md:grid-cols-12 border-neutral-700 border-t">
+                            <div class="hidden md:contents text-xs font-space uppercase tracking-widest text-neutral-500">
+                                <div class="col-span-3 text-gray-50 border-neutral-800 border-b pt-4 pr-4 pb-4">
+                                    Défi
+                                </div>
+                                <div class="col-span-3 text-gray-50 border-neutral-800 border-b border-l px-4 py-4">
+                                    Solution RAG
+                                </div>
+                                <div class="col-span-6 text-gray-50 border-neutral-800 border-b border-l pt-4 pl-4">
+                                    Avantage Algorithmique
+                                </div>
+                            </div>
+
+                            <div class="col-span-1 md:col-span-3 border-neutral-800 border-b pt-10 pr-4 pb-6 pl-4">
+                                <span class="font-medium text-red-400">
+                                    Réponses Incorrectes
+                                </span>
+                            </div>
+                            <div class="col-span-1 md:col-span-3 md:px-4 md:border-l flex border-neutral-800 border-b pt-6 pb-6 gap-x-3 gap-y-3 items-center">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="1.375rem" height="1.375rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-shield-check">
+                                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"></path>
+                                    <path d="m9 12 2 2 4-4"></path>
+                                </svg>
+                                <span class="font-space">
+                                    Détection d'Hallucinations
+                                </span>
+                            </div>
+                            <div class="col-span-1 md:col-span-6 md:pl-4 md:border-l text-sm font-normal text-neutral-400 border-neutral-800 border-b pt-6 pb-6 pl-4">
+                                Validation multi-critères : Le système évalue chaque réponse pour détecter les hallucinations, garantissant une précision maximale avant la génération finale.
+                            </div>
+
+                            <div class="col-span-1 md:col-span-3 border-neutral-800 border-b pt-10 pr-4 pb-6 pl-4">
+                                <span class="font-medium text-red-400">
+                                    Informations Limitées
+                                </span>
+                            </div>
+                            <div class="col-span-1 md:col-span-3 py-6 md:px-4 border-b border-neutral-800 md:border-l flex items-center gap-3">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="1.125rem" height="1.125rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-search">
+                                    <circle cx="11" cy="11" r="8"></circle>
+                                    <path d="m21 21-4.3-4.3"></path>
+                                </svg>
+                                <span class="font-space">Recherche Hybride</span>
+                            </div>
+                            <div class="col-span-1 md:col-span-6 md:pl-4 md:border-l text-sm text-neutral-400 border-neutral-800 border-b pt-6 pb-6">
+                                Retrieval intelligent : Combine recherche vectorielle et BM25 pour trouver les documents les plus pertinents dans votre base de connaissances, garantissant des réponses à jour et précises.
+                            </div>
+
+                            <div class="col-span-1 md:col-span-3 border-neutral-800 border-b pt-10 pr-4 pb-6 pl-4">
+                                <span class="text-red-400 font-medium">
+                                    Sources Non Traçables
+                                </span>
+                            </div>
+                            <div class="col-span-1 md:col-span-3 md:px-4 md:border-l flex gap-3 border-neutral-800 border-b pt-6 pb-6 gap-x-3 gap-y-3 items-center">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="1.375rem" height="1.375rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-book-open">
+                                    <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path>
+                                    <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path>
+                                </svg>
+                                <span class="font-space">
+                                    Citations Automatiques
+                                </span>
+                            </div>
+                            <div class="col-span-1 md:col-span-6 md:pl-4 md:border-l text-sm text-neutral-400 border-neutral-800 border-b pt-6 pb-6">
+                                Traçabilité complète : Chaque réponse inclut des citations cliquables vers les documents sources, permettant la vérification et renforçant la confiance.
+                            </div>
+
+                            <div class="col-span-1 md:col-span-3 border-neutral-800 border-b pt-10 pr-4 pb-6 pl-4">
+                                <span class="font-medium text-red-400">
+                                    Qualité Variable
+                                </span>
+                            </div>
+                            <div class="col-span-1 md:col-span-3 md:px-4 md:border-l flex gap-3 border-neutral-800 border-b pt-6 pb-6 gap-x-3 gap-y-3 items-center">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="1.5rem" height="1.5rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-star">
+                                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+                                </svg>
+                                <span class="font-space">
+                                    Évaluation Multi-Critères
+                                </span>
+                            </div>
+                            <div class="col-span-1 md:col-span-6 md:pl-4 md:border-l text-sm text-neutral-400 border-neutral-800 border-b pt-6 pb-6">
+                                Scoring intelligent : Évalue chaque réponse sur 5 critères (pertinence, complétude, concision, précision, cohérence) pour garantir une qualité constante et mesurable.
+                            </div>
+
+                            <div class="col-span-1 md:col-span-3 border-neutral-800 border-b pt-10 pr-4 pb-6 pl-4">
+                                <span class="font-medium text-red-400">
+                                    Performance Inconstante
+                                </span>
+                            </div>
+                            <div class="col-span-1 md:col-span-3 md:px-4 md:border-l flex gap-3 border-neutral-800 border-b pt-6 pb-6 gap-x-3 gap-y-3 items-center">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="1.375rem" height="1.375rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-zap">
+                                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                                </svg>
+                                <span class="font-space">
+                                    Circuit Breaker & Retry
+                                </span>
+                            </div>
+                            <div class="col-span-1 md:col-span-6 md:pl-4 md:border-l text-sm text-neutral-400 border-neutral-800 border-b pt-6 pb-6">
+                                Résilience maximale : Système de retry intelligent avec circuit breaker et fallback automatique, garantissant une disponibilité optimale même en cas de défaillance.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- FEATURES SECTION -->
+            <section id="about" class="md:px-12 max-w-7xl mr-auto ml-auto pt-24 pr-6 pb-24 pl-6">
+                <div class="mb-16">
+                    <span class="uppercase block text-xs font-semibold text-neutral-500 tracking-widest mb-2">
+                        Fonctionnalités Clés
+                    </span>
+                    <h3 class="md:text-6xl text-4xl font-medium text-neutral-900 tracking-tight font-oswald max-w-3xl">
+                        Une plateforme complète pour des réponses intelligentes et fiables.
+                    </h3>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+                    <div class="bg-white border border-neutral-200 rounded-2xl p-8 flex flex-col justify-between hover:shadow-xl hover:-translate-y-1 transition-all-300">
+                        <div>
+                            <div class="text-sm font-space uppercase tracking-widest text-neutral-500 mb-4">
+                                Utilisateur
+                            </div>
+                            <h4 class="text-3xl font-oswald font-medium mb-2">
+                                Interface de Chat
+                            </h4>
+                            <div class="text-4xl font-space font-semibold text-neutral-900 mb-6">
+                                Gratuit
+                            </div>
+                            <ul class="space-y-4 text-base text-neutral-600 mb-8">
+                                <li class="flex items-start gap-3">
+                                    <svg class="w-5 h-5 text-neutral-900 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 13l4 4L19 7"></path>
+                                    </svg>
+                                    Chat interactif avec streaming
+                                </li>
+                                <li class="flex items-start gap-3">
+                                    <svg class="w-5 h-5 text-neutral-900 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 13l4 4L19 7"></path>
+                                    </svg>
+                                    Citations cliquables
+                                </li>
+                                <li class="flex items-start gap-3">
+                                    <svg class="w-5 h-5 text-neutral-900 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 13l4 4L19 7"></path>
+                                    </svg>
+                                    Historique des conversations
+                                </li>
+                            </ul>
+                        </div>
+                        <button onclick="toggleLoginModal()" class="w-full py-4 border border-neutral-900 text-neutral-900 font-medium uppercase tracking-widest text-xs hover:bg-neutral-900 hover:text-white transition-colors">
+                            Accéder au Chat
+                        </button>
+                    </div>
+
+                    <div class="bg-neutral-900 text-white border border-neutral-800 rounded-2xl p-8 flex flex-col justify-between transform md:-translate-y-4 shadow-2xl relative overflow-hidden">
+                        <div class="absolute top-0 right-0 bg-white text-neutral-900 text-[0.6rem] font-semibold uppercase px-3 py-1">
+                            Recommandé
+                        </div>
+                        <div>
+                            <div class="text-sm font-space uppercase tracking-widest text-neutral-400 mb-4">
+                                Administrateur
+                            </div>
+                            <h4 class="text-3xl font-oswald font-medium mb-2">
+                                Dashboard Complet
+                            </h4>
+                            <div class="text-4xl font-space font-semibold text-white mb-6">
+                                Premium
+                            </div>
+                            <ul class="space-y-4 text-base text-neutral-300 mb-8">
+                                <li class="flex items-start gap-3">
+                                    <svg class="w-5 h-5 text-white shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 13l4 4L19 7"></path>
+                                    </svg>
+                                    Métriques de performance détaillées
+                                </li>
+                                <li class="flex items-start gap-3">
+                                    <svg class="w-5 h-5 text-white shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 13l4 4L19 7"></path>
+                                    </svg>
+                                    Analytics avancées
+                                </li>
+                                <li class="flex items-start gap-3">
+                                    <svg class="w-5 h-5 text-white shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 13l4 4L19 7"></path>
+                                    </svg>
+                                    Gestion des utilisateurs
+                                </li>
+                                <li class="flex items-start gap-3">
+                                    <svg class="w-5 h-5 text-white shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 13l4 4L19 7"></path>
+                                    </svg>
+                                    Export de données
+                                </li>
+                            </ul>
+                        </div>
+                        <button onclick="toggleLoginModal()" class="w-full py-4 bg-white text-neutral-900 font-medium uppercase tracking-widest text-xs hover:bg-neutral-200 transition-colors">
+                            Accéder au Dashboard
+                        </button>
+                    </div>
+
+                    <div class="bg-white border border-neutral-200 rounded-2xl p-8 flex flex-col justify-between hover:shadow-xl hover:-translate-y-1 transition-all-300">
+                        <div>
+                            <div class="text-sm font-space uppercase tracking-widest text-neutral-500 mb-4">
+                                Entreprise
+                            </div>
+                            <h4 class="text-3xl font-oswald font-medium mb-2">
+                                Solution Custom
+                            </h4>
+                            <div class="text-4xl font-space font-semibold text-neutral-900 mb-6">
+                                Sur mesure
+                            </div>
+                            <ul class="space-y-4 text-base text-neutral-600 mb-8">
+                                <li class="flex items-start gap-3">
+                                    <svg class="w-5 h-5 text-neutral-900 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 13l4 4L19 7"></path>
+                                    </svg>
+                                    Intégration API complète
+                                </li>
+                                <li class="flex items-start gap-3">
+                                    <svg class="w-5 h-5 text-neutral-900 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 13l4 4L19 7"></path>
+                                    </svg>
+                                    Support dédié 24/7
+                                </li>
+                                <li class="flex items-start gap-3">
+                                    <svg class="w-5 h-5 text-neutral-900 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 13l4 4L19 7"></path>
+                                    </svg>
+                                    Personnalisation avancée
+                                </li>
+                            </ul>
+                        </div>
+                        <button onclick="alert('Contactez-nous pour une solution sur mesure')" class="w-full py-4 border border-neutral-900 text-neutral-900 font-medium uppercase tracking-widest text-xs hover:bg-neutral-900 hover:text-white transition-colors">
+                            Nous Contacter
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <footer class="md:px-12 text-neutral-400 bg-neutral-900 border-neutral-800 border-t pt-12 pr-6 pb-12 pl-6">
+                <div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-start gap-8">
+                    <div>
+                        <div class="flex items-center gap-2 mb-4 text-white">
+                            <span class="font-oswald text-lg font-medium tracking-tight uppercase">
+                                RAG SYSTEM
+                            </span>
+                        </div>
+                        <p class="text-base max-w-xs leading-relaxed">
+                            La plateforme de référence pour la génération augmentée par récupération. Précision algorithmique pour des réponses fiables.
+                        </p>
+                    </div>
+                    <div class="grid grid-cols-2 md:grid-cols-3 gap-12 text-base">
+                        <div class="flex flex-col gap-3">
+                            <span class="text-white font-medium uppercase tracking-widest text-xs">
+                                Plateforme
+                            </span>
+                            <a href="#features" class="hover:text-white transition-colors">Fonctionnalités</a>
+                            <a href="#solutions" class="hover:text-white transition-colors">Solutions</a>
+                            <a href="#about" class="hover:text-white transition-colors">Documentation</a>
+                        </div>
+                        <div class="flex flex-col gap-3">
+                            <span class="text-white font-medium uppercase tracking-widest text-xs">
+                                Entreprise
+                            </span>
+                            <a href="#about" class="hover:text-white transition-colors">À propos</a>
+                            <a href="#" class="hover:text-white transition-colors">Blog</a>
+                            <a href="#" class="hover:text-white transition-colors">Support</a>
+                        </div>
+                    </div>
+                </div>
+                <div class="max-w-7xl mx-auto mt-12 pt-8 border-t border-neutral-800 text-xs flex justify-between">
+                    <span>© 2024 RAG System. Tous droits réservés.</span>
+                    <div class="flex gap-4">
+                        <span class="hover:text-white cursor-pointer">Confidentialité</span>
+                        <span class="hover:text-white cursor-pointer">Mentions légales</span>
+                    </div>
+                </div>
+            </footer>
+        </div>
+    </main>
+
+</body>
+</html>
+
