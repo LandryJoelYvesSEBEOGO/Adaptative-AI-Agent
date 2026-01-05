@@ -2,15 +2,18 @@
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 python-multipart==0.0.6
+httpx==0.27.2
 
 # CORS et sécurité
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
+bcrypt>=4.0.1,<5.0.0  # Requis par chromadb, patch appliqué pour passlib
 python-dotenv==1.0.0
 
 # Validation et sérialisation
-pydantic==2.5.0
+pydantic[email]
 pydantic-settings==2.1.0
 
 # Utilitaires
 aiofiles==23.2.1
+pytest==7.4.0

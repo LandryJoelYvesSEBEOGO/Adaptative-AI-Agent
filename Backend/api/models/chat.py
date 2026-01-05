@@ -1,0 +1,25 @@
+from pydantic import BaseModel
+from typing import Optional, List
+
+class ChatQueryRequest(BaseModel):
+    question: str
+    conversation_id: Optional[str] = None  # Pour maintenir le contexte
+
+class Citation(BaseModel):
+    id: int
+    source: str
+    excerpt: str
+    metadata: Optional[dict] = None
+
+class ChatQueryResponse(BaseModel):
+    response: str
+    citations: List[Citation] = []
+    conversation_id: str
+    latency: Optional[float] = None
+    success: bool = True
+    error: Optional[str] = None
+
+class FeedbackRequest(BaseModel):
+    message_id: str
+    feedback_type: str  # "thumbs_up" | "thumbs_down"
+    comment: Optional[str] = None
