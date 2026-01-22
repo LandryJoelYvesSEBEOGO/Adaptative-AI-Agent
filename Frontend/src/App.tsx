@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -5,6 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { ThemeProvider } from "next-themes";
 import { useAuthStore } from "@/stores/authStore";
+import { apiClient } from "@/services/api";
 
 // Pages
 import Index from "./pages/Index";
@@ -26,6 +28,37 @@ import ProtectedRoute from "./components/ProtectedRoute";
 
 const queryClient = new QueryClient();
 
+// Component to restore token on app startup and handle auth expiration
+const TokenRestorer = () => {
+  const { logout } = useAuthStore();
+  
+  useEffect(() => {
+    // Restaurer le token si l'utilisateur est déjà authentifié
+    const token = localStorage.getItem('auth_token');
+    if (token) {
+      apiClient.setToken(token);
+    }
+
+    // Écouter l'événement d'expiration de session
+    const handleAuthExpired = () => {
+      logout();
+      // Rediriger vers la page de login si on n'y est pas déjà
+      if (window.location.pathname !== '/login' && window.location.pathname !== '/') {
+        window.location.href = '/login';
+      }
+    };
+
+    window.addEventListener('auth:expired', handleAuthExpired);
+
+    // Nettoyer l'écouteur au démontage
+    return () => {
+      window.removeEventListener('auth:expired', handleAuthExpired);
+    };
+  }, [logout]);
+  
+  return null;
+};
+
 // Redirect component based on auth state
 const AuthRedirect = () => {
   const { isAuthenticated, user } = useAuthStore();
@@ -45,6 +78,7 @@ const App = () => (
   <QueryClientProvider client={queryClient}>
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
       <TooltipProvider>
+        <TokenRestorer />
         <Toaster />
         <Sonner />
         <BrowserRouter>

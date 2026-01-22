@@ -4,13 +4,14 @@ import sys
 import time
 import re
 from typing import Tuple
+from urllib.parse import urlparse
 from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_community.tools.tavily_search.tool import TavilySearchResults
 from langgraph.graph import StateGraph, END
 from IPython.display import Image, display
-from langchain.schema import Document
+from langchain_core.documents import Document
 from typing import List, Annotated, Dict, Optional, Callable
 from typing_extensions import TypedDict
 from sentence_transformers import CrossEncoder
@@ -26,9 +27,16 @@ from config.Config import Config
 from src.rag.Prompts import get_prompts
 from src.rag.Data_processing import get_retriever
 from src.core.exceptions import (
-    RetrievalException, LLMAPIException, LLMTimeoutException,
-    LLMQuotaException, InvalidResponseException, MaxRetriesException,
-    WebSearchException, HallucinationDetectedException, ValidationException
+    RetrievalException,
+    LLMAPIException,
+    LLMTimeoutException,
+    LLMQuotaException,
+    InvalidResponseException,
+    MaxRetriesException,
+    WebSearchException,
+    HallucinationDetectedException,
+    ValidationException,
+    GenerationException,  # ✅ utilisé pour les erreurs de génération (streaming et non-streaming)
 )
 import uuid
 from src.core.metrics import get_metrics_collector
@@ -40,6 +48,7 @@ from src.core.retry_policy import (
 )
 from src.core.recovery_strategies import RecoveryStrategy
 from src.core.fallback import get_fallback_manager
+from src.core.groq_key_manager import get_groq_key_manager
 
 # Initialiser logger et metrics
 logger = get_logger()
@@ -47,12 +56,8 @@ metrics = get_metrics_collector()
 # Load environment variables
 load_dotenv()
 
-# Initialize the necessary components
-local_llm = ChatGroq(
-    model_name=Config.GROQ_model,
-    temperature=0,
-    groq_api_key=Config.GROQ_API_KEY
-)
+# Gestionnaire de clés API Groq avec rotation automatique
+groq_key_manager = get_groq_key_manager()
 
 # Circuit breakers pour différents services
 llm_circuit_breaker = get_circuit_breaker("llm") if getattr(Config, 'CIRCUIT_BREAKER_ENABLED', True) else None
@@ -61,12 +66,10 @@ retrieval_circuit_breaker = get_circuit_breaker("retrieval") if getattr(Config, 
 
 # Fallback manager
 fallback_manager = get_fallback_manager() if getattr(Config, 'FALLBACK_MODELS_ENABLED', True) else None
-llm_json_mode = ChatGroq(
-    model_name=Config.GROQ_model, 
-    temperature=0,
-    model_kwargs={"response_format": {"type": "json_object"}},
-    groq_api_key=Config.GROQ_API_KEY
-)
+
+# LLM legacy (pour compatibilité, mais utiliser groq_key_manager de préférence)
+local_llm = groq_key_manager.get_current_llm(json_mode=False)
+llm_json_mode = groq_key_manager.get_current_llm(json_mode=True)
 
 # Dans Rag_model.py, remplacez la ligne 48:
 # retriever = get_retriever()
@@ -154,33 +157,29 @@ def retry_with_backoff(func: Callable, max_retries: int = None,
 def get_llm_with_fallback():
     """
     Récupère le LLM actuel, avec fallback automatique si activé.
+    Utilise le gestionnaire de clés API pour la rotation automatique.
     """
     if fallback_manager and getattr(Config, 'FALLBACK_MODELS_ENABLED', True):
         llm = fallback_manager.get_current_llm()
         if llm:
             return llm
     
-    # Fallback sur le LLM principal
-    return local_llm
+    # Utiliser le gestionnaire de clés API (rotation automatique en cas de rate limit)
+    return groq_key_manager.get_current_llm(json_mode=False)
 
 def get_llm_json_with_fallback():
     """
     Récupère le LLM en mode JSON avec fallback automatique.
+    Utilise le gestionnaire de clés API pour la rotation automatique.
     """
     if fallback_manager and getattr(Config, 'FALLBACK_MODELS_ENABLED', True):
         current_llm = fallback_manager.get_current_llm()
         if current_llm:
-            # Créer un nouveau LLM avec les mêmes paramètres mais en mode JSON
-            model_name = fallback_manager.get_current_model_name()
-            return ChatGroq(
-                model_name=model_name,
-                temperature=0,
-                model_kwargs={"response_format": {"type": "json_object"}},
-                groq_api_key=Config.GROQ_API_KEY
-            )
+            # Utiliser le gestionnaire de clés pour créer le LLM JSON
+            return groq_key_manager.get_current_llm(json_mode=True)
     
-    # Fallback sur le LLM JSON principal
-    return llm_json_mode
+    # Utiliser le gestionnaire de clés API (rotation automatique en cas de rate limit)
+    return groq_key_manager.get_current_llm(json_mode=True)
 
 def Rewrite_query(query: str) -> str:
     """Rewrite the query to be more specific."""
@@ -192,8 +191,11 @@ def Rewrite_query(query: str) -> str:
         rewritting_prompt_formatted = prompt["Rewritting_prompt"].format(query=query)
         
         def _call_llm():
-            llm = get_llm_with_fallback()
-            return llm.invoke([HumanMessage(content=rewritting_prompt_formatted)])
+            # Utiliser le gestionnaire de clés avec fallback automatique
+            return groq_key_manager.invoke_with_fallback(
+                [HumanMessage(content=rewritting_prompt_formatted)],
+                json_mode=False
+            )
         
         generation = retry_with_backoff_advanced(
             _call_llm,
@@ -245,23 +247,139 @@ def format_docs(docs, with_citations: bool = True):
 
 def extract_sources_from_documents(documents: List[Document]) -> List[Dict[str, str]]:
     """
-    Extrait les informations de source de chaque document.
+    Extrait les informations de source de chaque document, incluant le numéro de page.
     
     Args:
         documents: Liste de documents LangChain
     
     Returns:
-        Liste de dictionnaires avec les infos de source
+        Liste de dictionnaires avec les infos de source (incluant page si disponible)
     """
     sources = []
     for idx, doc in enumerate(documents, start=1):
         metadata = doc.metadata if hasattr(doc, 'metadata') else {}
+        
+        # DEBUG: Afficher les métadonnées pour comprendre le problème
+        # (à désactiver en production)
+        if getattr(Config, 'DEBUG_METADATA', False):
+            print(f"[DEBUG] Document {idx} metadata: {metadata}")
+        
+        # Extraire le numéro de page (PyPDFLoader utilise 'page', parfois 'page_number')
+        page_number = None
+        if 'page' in metadata:
+            page_number = metadata.get('page')
+            # Si c'est un index (0-based), convertir en numéro de page (1-based)
+            if isinstance(page_number, int) and page_number >= 0:
+                page_number = page_number + 1  # Convertir de 0-based à 1-based
+        elif 'page_number' in metadata:
+            page_number = metadata.get('page_number')
+        
+        # Extraire la source brute depuis les métadonnées (essayer plusieurs clés)
+        raw_source = (
+            metadata.get('source', '') or 
+            metadata.get('source_path', '') or 
+            metadata.get('file_path', '') or
+            ''
+        )
+        
+        # DEBUG: Afficher les métadonnées pour comprendre le problème
+        if getattr(Config, 'DEBUG_METADATA', False):
+            print(f"\n[DEBUG] Document {idx}:")
+            print(f"  - raw_source: {raw_source}")
+            print(f"  - title: {metadata.get('title', 'N/A')}")
+            print(f"  - metadata keys: {list(metadata.keys())}")
+            print(f"  - full metadata: {metadata}")
+        
+        # Déterminer le nom d'affichage (titre) avec logique intelligente
+        display_name = metadata.get('title', '')
+        
+        # Nettoyer le titre s'il est invalide (détecter tous les "Document N")
+        import re
+        is_invalid_title = (
+            not display_name or
+            display_name == 'Unknown source' or
+            display_name.startswith('unknown_') or
+            display_name.startswith('document_') or
+            re.match(r'^Document \d+$', display_name) is not None  # Détecte "Document 1", "Document 2", etc.
+        )
+        if is_invalid_title:
+            display_name = ''
+        
+        # Si pas de titre valide, extraire depuis la source
+        if not display_name:
+            if raw_source and raw_source not in ['Unknown source', ''] and not raw_source.startswith('unknown_'):
+                # Vérifier si c'est une URL
+                if raw_source.startswith('http://') or raw_source.startswith('https://'):
+                    # C'est une URL web : formater le nom de la page
+                    try:
+                        parsed = urlparse(raw_source)
+                        # Créer un nom lisible : domaine + chemin simplifié
+                        domain = parsed.netloc.replace('www.', '')
+                        path = parsed.path.strip('/').replace('/', ' - ')
+                        if path:
+                            display_name = f"{domain} - {path}"
+                        else:
+                            display_name = domain
+                    except:
+                        display_name = raw_source
+                # Vérifier si c'est un chemin de fichier (PDF)
+                elif '/' in raw_source or '\\' in raw_source:
+                    # C'est un fichier : extraire le nom sans extension
+                    filename = os.path.basename(raw_source.replace('\\', '/'))
+                    if filename.endswith('.pdf'):
+                        display_name = filename[:-4]  # Enlever .pdf
+                    else:
+                        display_name = filename
+                else:
+                    # Source simple, l'utiliser directement
+                    display_name = raw_source
+        
+        # Si toujours pas de nom valide après tous les essais
+        if not display_name or display_name in ['Unknown source', 'Document 1', 'Document 2', 'Document 3'] or re.match(r'^Document \d+$', display_name):
+            # Essayer d'autres métadonnées comme dernier recours
+            # Chercher dans toutes les métadonnées pour trouver un chemin ou un nom
+            for key, value in metadata.items():
+                if value and isinstance(value, str):
+                    # Si on trouve un chemin de fichier dans n'importe quelle métadonnée
+                    if ('/' in value or '\\' in value) and (value.endswith('.pdf') or '.pdf' in value):
+                        filename = os.path.basename(value.replace('\\', '/'))
+                        if filename.endswith('.pdf'):
+                            display_name = filename[:-4]
+                        else:
+                            display_name = filename
+                        break
+                    # Si on trouve une URL
+                    elif value.startswith('http://') or value.startswith('https://'):
+                        try:
+                            parsed = urlparse(value)
+                            domain = parsed.netloc.replace('www.', '')
+                            path = parsed.path.strip('/').replace('/', ' - ')
+                            if path:
+                                display_name = f"{domain} - {path}"
+                            else:
+                                display_name = domain
+                            break
+                        except:
+                            pass
+            
+            # Si toujours rien, utiliser le numéro de page si disponible
+            if not display_name or display_name in ['Unknown source', 'Document 1', 'Document 2', 'Document 3'] or re.match(r'^Document \d+$', display_name):
+                if page_number is not None:
+                    display_name = f'Document (page {page_number})'
+                else:
+                    # Utiliser l'index mais seulement en dernier recours
+                    display_name = f'Document {idx}'
+        
+        # Pour la source technique, garder la source brute ou utiliser le display_name
+        source = raw_source if raw_source and not raw_source.startswith('unknown_') else display_name
+        
         source_info = {
             "number": idx,
-            "source": metadata.get('source', 'Unknown source'),
+            "source": source,
             "parent_doc_id": metadata.get('parent_doc_id', ''),
             "chunk_id": metadata.get('chunk_id', ''),
-            "title": metadata.get('title', '') or metadata.get('source', '').split('/')[-1]
+            "title": display_name,  # Utiliser le nom d'affichage calculé
+            "page": page_number  # Ajouter le numéro de page
         }
         sources.append(source_info)
     return sources
@@ -300,8 +418,49 @@ def format_citations(response: str, sources: List[Dict[str, str]]) -> Tuple[str,
         references_parts = ["\n\n**Références:**"]
         for num in sorted(citations_used):
             source_info = sources[num - 1]  # -1 car les indices commencent à 0
-            source_display = source_info.get('title') or source_info.get('source', f'Document {num}')
-            references_parts.append(f"[{num}] {source_display}")
+            
+            # Déterminer le nom à afficher (toujours utiliser le titre calculé)
+            source_display = source_info.get('title', '')
+            
+            # Si le titre n'est pas valide, extraire depuis la source
+            if not source_display or source_display == 'Unknown source' or source_display.startswith('unknown_'):
+                source_path = source_info.get('source', '')
+                if source_path:
+                    # Vérifier si c'est une URL
+                    if source_path.startswith('http://') or source_path.startswith('https://'):
+                        try:
+                            parsed = urlparse(source_path)
+                            domain = parsed.netloc.replace('www.', '')
+                            path = parsed.path.strip('/').replace('/', ' - ')
+                            if path:
+                                source_display = f"{domain} - {path}"
+                            else:
+                                source_display = domain
+                        except:
+                            source_display = source_path
+                    # Vérifier si c'est un chemin de fichier
+                    elif '/' in source_path or '\\' in source_path:
+                        filename = os.path.basename(source_path.replace('\\', '/'))
+                        if filename.endswith('.pdf'):
+                            source_display = filename[:-4]
+                        else:
+                            source_display = filename
+                    else:
+                        source_display = source_path
+                else:
+                    source_display = f'Document {num}'
+            
+            # S'assurer qu'on n'a jamais "Unknown source"
+            if source_display == 'Unknown source' or source_display.startswith('unknown_'):
+                source_display = f'Document {num}'
+            
+            # Ajouter le numéro de page si disponible
+            page_number = source_info.get('page')
+            if page_number is not None:
+                # Formater avec le numéro de page
+                references_parts.append(f"[{num}] {source_display} (page {page_number})")
+            else:
+                references_parts.append(f"[{num}] {source_display}")
         
         references_section = "\n".join(references_parts)
     else:
@@ -466,7 +625,9 @@ def retrieve(state: Dict) -> Dict:
             return {
                 "documents": [],
                 "error_history": state.get("error_history", []) + ["Aucun document trouve"],
-                "latencies": latencies
+                "latencies": latencies,
+                "question": state.get("question"),  # Préserver la question
+                "conversation_id": conversation_id
             }
         
         print(f"[RETRIEVE] ✅ {len(documents)} documents trouves en {elapsed_time:.2f}s.")
@@ -504,7 +665,14 @@ def retrieve(state: Dict) -> Dict:
                 "data": {"latency": elapsed_time, "num_documents": len(documents)}
             }
         )
-        return {"documents": documents, "latencies": latencies}
+        # Préserver tous les champs du state, notamment la question
+        return {
+            "documents": documents,
+            "latencies": latencies,
+            "question": state.get("question"),  # Préserver la question
+            "conversation_id": conversation_id,
+            "error_history": state.get("error_history", [])
+        }
         
     except RetrievalException:
         raise
@@ -548,8 +716,11 @@ def generate(state: Dict) -> Dict:
         )
         
         def _generate():
-            llm = get_llm_with_fallback()
-            return llm.invoke([HumanMessage(content=rag_prompt_formatted)])
+            # Utiliser le gestionnaire de clés avec fallback automatique
+            return groq_key_manager.invoke_with_fallback(
+                [HumanMessage(content=rag_prompt_formatted)],
+                json_mode=False
+            )
         
         try:
             generation = retry_with_backoff_advanced(
@@ -621,9 +792,9 @@ def generate(state: Dict) -> Dict:
         logger.error(
             "Generation failed",
             extra={"component": "generation", "conversation_id": conversation_id},
-            exc_info=True
+            exc_info=True,
         )
-        from src.core.exceptions import GenerationException
+        # Lever une exception métier claire, déjà importée en haut du fichier
         raise GenerationException(error_msg) from e
 
 def generate_stream(state: Dict, stream_callback=None):
@@ -665,13 +836,12 @@ def generate_stream(state: Dict, stream_callback=None):
         # Accumulateur pour la réponse complète
         full_response = ""
         
-        # Streamer la réponse
-        def _generate_stream():
-            llm = get_llm_with_fallback()
-            return llm.stream([HumanMessage(content=rag_prompt_formatted)])
-        
+        # Streamer la réponse avec fallback automatique sur les clés
         try:
-            stream = _generate_stream()
+            stream = groq_key_manager.stream_with_fallback(
+                [HumanMessage(content=rag_prompt_formatted)],
+                json_mode=False
+            )
             
             for chunk in stream:
                 if hasattr(chunk, 'content') and chunk.content:
@@ -709,8 +879,11 @@ def generate_stream(state: Dict, stream_callback=None):
             )
             
             def _generate():
-                llm = get_llm_with_fallback()
-                return llm.invoke([HumanMessage(content=rag_prompt_formatted)])
+                # Utiliser le gestionnaire de clés avec fallback automatique
+                return groq_key_manager.invoke_with_fallback(
+                    [HumanMessage(content=rag_prompt_formatted)],
+                    json_mode=False
+                )
             
             generation = retry_with_backoff_advanced(
                 _generate,
@@ -751,9 +924,9 @@ def generate_stream(state: Dict, stream_callback=None):
         logger.error(
             "Generation with streaming failed",
             extra={"component": "generation", "conversation_id": conversation_id},
-            exc_info=True
+            exc_info=True,
         )
-        from src.core.exceptions import GenerationException
+        # Lever une exception métier claire, déjà importée en haut du fichier
         raise GenerationException(error_msg) from e
 
 
@@ -769,10 +942,35 @@ def grade_documents(state: Dict) -> Dict:
         filtered_docs = []
         web_search = "No"
         
+        # Vérifier que la question est présente
+        question = state.get("question")
+        if not question:
+            print("⚠️ Question manquante dans le state pour le grading")
+            elapsed_time = time.time() - start_time
+            latencies["grading"] = elapsed_time
+            return {
+                "documents": [],
+                "web_search": "Yes",
+                "latencies": latencies,
+                "question": None,  # Question manquante
+                "conversation_id": conversation_id,
+                "error_history": state.get("error_history", []) + ["Question manquante pour grading"]
+            }
+        
         if not state.get("documents"):
             elapsed_time = time.time() - start_time
             latencies["grading"] = elapsed_time
-            return {"documents": [], "web_search": "Yes", "latencies": latencies}
+            return {
+                "documents": [],
+                "web_search": "Yes",
+                "latencies": latencies,
+                "question": question,  # Préserver la question
+                "conversation_id": conversation_id,
+                "error_history": state.get("error_history", [])
+            }
+        
+        # Obtenir les prompts avec la question
+        prompt = get_prompts(question=question)
         
         # Vérifier si multi-criteria grading est activé
         multi_criteria_enabled = getattr(Config, 'MULTI_CRITERIA_GRADING_ENABLED', True)
@@ -786,14 +984,15 @@ def grade_documents(state: Dict) -> Dict:
                     # Grading multi-critères
                     grader_prompt_formatted = prompt["multi_criteria_grader_prompt"].format(
                         document=doc.page_content[:4000],  # Limiter la longueur pour éviter token limit
-                        question=state["question"]
+                        question=question
                     )
                     
                     def _grade():
-                        llm = get_llm_json_with_fallback()
-                        return llm.invoke(
+                        # Utiliser le gestionnaire de clés avec fallback automatique (mode JSON)
+                        return groq_key_manager.invoke_with_fallback(
                             [SystemMessage(content=prompt["multi_criteria_grader_instructions"])] +
-                            [HumanMessage(content=grader_prompt_formatted)]
+                            [HumanMessage(content=grader_prompt_formatted)],
+                            json_mode=True
                         )
                     
                     result = retry_with_backoff_advanced(
@@ -866,14 +1065,15 @@ def grade_documents(state: Dict) -> Dict:
                     # Grading binaire (fallback ou désactivé)
                     doc_grader_prompt_formatted = prompt["doc_grader_prompt"].format(
                         document=doc.page_content[:4000],
-                        question=state["question"]
+                        question=question
                     )
                     
                     def _grade():
-                        llm = get_llm_json_with_fallback()
-                        return llm.invoke(
+                        # Utiliser le gestionnaire de clés avec fallback automatique (mode JSON)
+                        return groq_key_manager.invoke_with_fallback(
                             [SystemMessage(content=prompt["doc_grader_instructions"])] +
-                            [HumanMessage(content=doc_grader_prompt_formatted)]
+                            [HumanMessage(content=doc_grader_prompt_formatted)],
+                            json_mode=True
                         )
                     
                     result = retry_with_backoff_advanced(
@@ -918,7 +1118,15 @@ def grade_documents(state: Dict) -> Dict:
             }
         )
         
-        return {"documents": filtered_docs, "web_search": web_search, "latencies": latencies}
+        # Préserver tous les champs du state, notamment la question
+        return {
+            "documents": filtered_docs,
+            "web_search": web_search,
+            "latencies": latencies,
+            "question": question,  # Préserver la question
+            "conversation_id": conversation_id,
+            "error_history": state.get("error_history", [])
+        }
         
     except Exception as e:
         elapsed_time = time.time() - start_time
@@ -929,8 +1137,15 @@ def grade_documents(state: Dict) -> Dict:
             extra={"component": "grading", "conversation_id": conversation_id},
             exc_info=True
         )
-        # En cas d'erreur, on continue avec tous les documents
-        return {"documents": state.get("documents", []), "web_search": "Yes", "latencies": latencies}
+        # En cas d'erreur, on continue avec tous les documents mais on préserve la question
+        return {
+            "documents": state.get("documents", []),
+            "web_search": "Yes",
+            "latencies": latencies,
+            "question": state.get("question"),  # Préserver la question
+            "conversation_id": conversation_id,
+            "error_history": state.get("error_history", []) + [f"Erreur grading: {str(e)}"]
+        }
 
 def web_search(state: Dict) -> Dict:
     """Perform a web search based on the question."""
@@ -958,7 +1173,12 @@ def web_search(state: Dict) -> Dict:
             print("⚠️ Aucun résultat de recherche web")
             elapsed_time = time.time() - start_time
             latencies["web_search"] = elapsed_time
-            return {"documents": state.get("documents", []), "latencies": latencies}
+            return {
+                "documents": state.get("documents", []),
+                "latencies": latencies,
+                "question": state.get("question"),  # Préserver la question
+                "conversation_id": conversation_id
+            }
         
         web_results = "\n".join([d.get("content", "") for d in docs if d.get("content")])
         
@@ -966,7 +1186,12 @@ def web_search(state: Dict) -> Dict:
             print("⚠️ Résultats web vides")
             elapsed_time = time.time() - start_time
             latencies["web_search"] = elapsed_time
-            return {"documents": state.get("documents", []), "latencies": latencies}
+            return {
+                "documents": state.get("documents", []),
+                "latencies": latencies,
+                "question": state.get("question"),  # Préserver la question
+                "conversation_id": conversation_id
+            }
         
         documents = state.get("documents", [])
         documents.append(Document(page_content=web_results))
@@ -983,7 +1208,14 @@ def web_search(state: Dict) -> Dict:
             }
         )
         
-        return {"documents": documents, "latencies": latencies}
+        # Préserver tous les champs du state, notamment la question
+        return {
+            "documents": documents,
+            "latencies": latencies,
+            "question": state.get("question"),  # Préserver la question
+            "conversation_id": conversation_id,
+            "error_history": state.get("error_history", [])
+        }
     except Exception as e:
         elapsed_time = time.time() - start_time
         latencies["web_search"] = elapsed_time
@@ -994,8 +1226,14 @@ def web_search(state: Dict) -> Dict:
             extra={"component": "web_search", "conversation_id": conversation_id},
             exc_info=True
         )
-        # Ne pas bloquer, continuer avec les documents existants
-        return {"documents": state.get("documents", []), "latencies": latencies}
+        # Ne pas bloquer, continuer avec les documents existants mais préserver la question
+        return {
+            "documents": state.get("documents", []),
+            "latencies": latencies,
+            "question": state.get("question"),  # Préserver la question
+            "conversation_id": conversation_id,
+            "error_history": state.get("error_history", []) + [f"Erreur web_search: {str(e)}"]
+        }
 
 
 # Edge functions
@@ -1005,10 +1243,11 @@ def route_question(state: Dict) -> str:
         print("---ROUTE QUESTION---")
         
         def _route():
-            llm = get_llm_json_with_fallback()
-            return llm.invoke(
+            # Utiliser le gestionnaire de clés avec fallback automatique (mode JSON)
+            return groq_key_manager.invoke_with_fallback(
                 [SystemMessage(content=prompt["router_instructions"])] +
-                [HumanMessage(content=state["question"])]
+                [HumanMessage(content=state["question"])],
+                json_mode=True
             )
         
         route_result = retry_with_backoff_advanced(
@@ -1061,10 +1300,11 @@ def grade_generation_v_documents_and_question(state: Dict) -> str:
             )
             
             def _check_hallucination():
-                llm = get_llm_json_with_fallback()
-                return llm.invoke(
+                # Utiliser le gestionnaire de clés avec fallback automatique (mode JSON)
+                return groq_key_manager.invoke_with_fallback(
                     [SystemMessage(content=prompt["hallucination_grader_instructions"])] +
-                    [HumanMessage(content=hallucination_grader_prompt_formatted)]
+                    [HumanMessage(content=hallucination_grader_prompt_formatted)],
+                    json_mode=True
                 )
             
             result = retry_with_backoff_advanced(
@@ -1113,10 +1353,11 @@ def grade_generation_v_documents_and_question(state: Dict) -> str:
             )
             
             def _check_useful():
-                llm = get_llm_json_with_fallback()
-                return llm.invoke(
+                # Utiliser le gestionnaire de clés avec fallback automatique (mode JSON)
+                return groq_key_manager.invoke_with_fallback(
                     [SystemMessage(content=prompt["answer_grader_instructions"])] +
-                    [HumanMessage(content=answer_grader_prompt_formatted)]
+                    [HumanMessage(content=answer_grader_prompt_formatted)],
+                    json_mode=True
                 )
             
             result = retry_with_backoff_advanced(
@@ -1188,10 +1429,11 @@ def grade_answer_quality(state: Dict) -> Dict:
         )
         
         def _score_quality():
-            llm = get_llm_json_with_fallback()
-            return llm.invoke(
+            # Utiliser le gestionnaire de clés avec fallback automatique (mode JSON)
+            return groq_key_manager.invoke_with_fallback(
                 [SystemMessage(content=prompt["answer_quality_scorer_instructions"])] +
-                [HumanMessage(content=quality_prompt_formatted)]
+                [HumanMessage(content=quality_prompt_formatted)],
+                json_mode=True
             )
         
         result = retry_with_backoff_advanced(
@@ -1640,6 +1882,10 @@ def get_final_response_stream(query: str):
         # Récupérer les latences
         latencies = final_state.get("latencies", latencies)
         latencies["end_to_end"] = time.time() - start_time
+        
+        # Récupérer la réponse complète depuis l'état final
+        generation = final_state.get("generation", "")
+        full_response = generation if isinstance(generation, str) else (generation.content if hasattr(generation, 'content') else str(generation))
         
         # Enregistrer les métriques
         if getattr(Config, 'METRICS_ENABLED', True):

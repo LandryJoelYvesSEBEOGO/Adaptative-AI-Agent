@@ -14,9 +14,27 @@ def get_embeddings():
     """Retourne une instance singleton des embeddings."""
     global _embeddings
     if _embeddings is None:
+        # Configuration du device (GPU/CPU)
+        device = "cpu"
+        try:
+            import torch
+            if Config.FORCE_GPU or Config.DEVICE_PREFERENCE == "cuda":
+                device = "cuda"
+                if torch.cuda.is_available():
+                    print(f"[INFO] CUDA détecté pour few-shot embeddings: {torch.cuda.get_device_name(0)}")
+                else:
+                    print("[WARNING] CUDA non disponible, mais utilisation forcée du GPU pour few-shot embeddings")
+            elif Config.DEVICE_PREFERENCE == "auto":
+                if torch.cuda.is_available():
+                    device = "cuda"
+        except Exception:
+            if Config.FORCE_GPU or Config.DEVICE_PREFERENCE == "cuda":
+                device = "cuda"
+        
         _embeddings = NomicEmbeddings(
             model=Config.NomicEmbeddings_model,  # Utiliser le modèle de la config
-            inference_mode="local"  # Mode local, pas besoin de token API
+            inference_mode="local",  # Mode local, pas besoin de token API
+            device=device
         )
     return _embeddings
 
@@ -45,8 +63,15 @@ def load_few_shot_examples() -> List[Dict[str, str]]:
             }
         ]
         
+        # Si examples_file est None, utiliser un chemin par défaut
+        if not examples_file:
+            project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+            examples_file = os.path.join(project_root, "data", "few_shot_examples.json")
+        
         # Créer le répertoire si nécessaire
-        os.makedirs(os.path.dirname(examples_file), exist_ok=True)
+        examples_dir = os.path.dirname(examples_file)
+        if examples_dir:
+            os.makedirs(examples_dir, exist_ok=True)
         
         # Sauvegarder les exemples par défaut
         with open(examples_file, 'w', encoding='utf-8') as f:

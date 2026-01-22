@@ -75,3 +75,31 @@ def verify_token(token: str) -> Optional[dict]:
         return payload
     except JWTError:
         return None
+
+def create_user(email: str, password: str, name: str, role: str = "user") -> Optional[dict]:
+    """Crée un nouvel utilisateur."""
+    # Vérifier si l'utilisateur existe déjà
+    if get_user_by_email(email):
+        return None
+    
+    # Générer un nouvel ID
+    new_id = str(len(MOCK_USERS) + 1)
+    
+    # Hasher le mot de passe
+    hashed_password = pwd_context.hash(password)
+    
+    # Créer le nouvel utilisateur
+    new_user = {
+        "id": new_id,
+        "email": email.lower(),
+        "hashed_password": hashed_password,
+        "name": name,
+        "role": role if role in ["admin", "user"] else "user"
+    }
+    
+    # Ajouter à la liste (dans une vraie app, on sauvegarderait en DB)
+    MOCK_USERS.append(new_user)
+    
+    # Retourner l'utilisateur sans le hash
+    user_without_password = {k: v for k, v in new_user.items() if k != "hashed_password"}
+    return user_without_password

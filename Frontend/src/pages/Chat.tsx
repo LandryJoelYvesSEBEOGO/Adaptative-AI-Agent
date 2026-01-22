@@ -23,6 +23,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { useToast } from "@/hooks/use-toast";
 import ThemeToggle from "@/components/ThemeToggle";
 import { cn } from "@/lib/utils";
+import { apiClient, ApiError } from "@/services/api";
 
 interface Message {
   id: string;
@@ -30,45 +31,12 @@ interface Message {
   content: string;
   timestamp: Date;
   citations?: { id: number; source: string; excerpt: string }[];
+  messageId?: string; // Pour le feedback
 }
 
 interface SuggestedQuestion {
   text: string;
 }
-
-// Mock responses for demo
-const mockResponses = [
-  {
-    content: `D'après notre documentation, voici les étapes pour configurer les paramètres de sécurité [1]:
-
-1. Accédez au panneau d'administration
-2. Naviguez vers "Paramètres > Sécurité"
-3. Activez l'authentification à deux facteurs [2]
-4. Configurez les règles de pare-feu selon vos besoins
-
-Pour plus de détails, consultez également notre guide sur les bonnes pratiques [3].`,
-    citations: [
-      { id: 1, source: "Guide de sécurité v2.0", excerpt: "Les paramètres de sécurité sont accessibles depuis le panneau d'administration..." },
-      { id: 2, source: "FAQ Authentification", excerpt: "L'authentification à deux facteurs (2FA) ajoute une couche de sécurité supplémentaire..." },
-      { id: 3, source: "Bonnes pratiques IT", excerpt: "Pour garantir la sécurité de votre système, nous recommandons les mesures suivantes..." },
-    ],
-  },
-  {
-    content: `Les meilleures pratiques pour l'intégration API incluent [1]:
-
-- Utiliser des tokens d'authentification JWT
-- Implémenter le rate limiting pour protéger vos endpoints
-- Valider toutes les entrées utilisateur [2]
-- Utiliser HTTPS pour toutes les communications
-
-Notre SDK simplifie grandement ces étapes [3].`,
-    citations: [
-      { id: 1, source: "Documentation API v3.1", excerpt: "Les bonnes pratiques d'intégration API garantissent la sécurité et la fiabilité..." },
-      { id: 2, source: "Guide de validation", excerpt: "La validation des entrées est essentielle pour prévenir les injections..." },
-      { id: 3, source: "SDK Guide", excerpt: "Notre SDK fournit des méthodes prêtes à l'emploi pour l'authentification..." },
-    ],
-  },
-];
 
 const suggestedQuestions: SuggestedQuestion[] = [
   { text: "Comment configurer l'authentification ?" },
@@ -81,6 +49,7 @@ const Chat = () => {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [conversationId, setConversationId] = useState<string | undefined>(undefined);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { user, logout } = useAuthStore();
@@ -106,24 +75,93 @@ const Chat = () => {
     };
 
     setMessages((prev) => [...prev, userMessage]);
+    const question = input.trim();
     setInput("");
     setIsLoading(true);
 
-    // Simulate API call with streaming effect
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-
-    const mockResponse = mockResponses[Math.floor(Math.random() * mockResponses.length)];
-    
+    // Créer un message assistant vide pour le streaming
+    const assistantMessageId = (Date.now() + 1).toString();
     const assistantMessage: Message = {
-      id: (Date.now() + 1).toString(),
+      id: assistantMessageId,
       role: "assistant",
-      content: mockResponse.content,
+      content: "",
       timestamp: new Date(),
-      citations: mockResponse.citations,
+      messageId: assistantMessageId,
     };
 
     setMessages((prev) => [...prev, assistantMessage]);
-    setIsLoading(false);
+
+    try {
+      // Utiliser le streaming pour une meilleure UX
+      let fullResponse = "";
+      let citations: Message["citations"] = [];
+
+      await apiClient.queryRAGStream(
+        question,
+        conversationId,
+        (chunk: string) => {
+          fullResponse += chunk;
+          // Mettre à jour le message en temps réel
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantMessageId
+                ? { ...msg, content: fullResponse }
+                : msg
+            )
+          );
+          scrollToBottom();
+        }
+      );
+
+      // Une fois le streaming terminé, récupérer les citations et le conversation_id
+      // Pour l'instant, on extrait les citations du texte
+      const citationMatches = fullResponse.match(/\[(\d+)\]/g);
+      if (citationMatches) {
+        const uniqueIds = [...new Set(citationMatches.map(m => parseInt(m.slice(1, -1))))];
+        citations = uniqueIds.map(id => ({
+          id,
+          source: `Document ${id}`,
+          excerpt: `Extrait du document ${id}`,
+        }));
+      }
+
+      // Mettre à jour le message final avec les citations
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantMessageId
+            ? { ...msg, citations }
+            : msg
+        )
+      );
+    } catch (error) {
+      // Utiliser le système d'erreurs expressif
+      const apiError = error instanceof ApiError 
+        ? error 
+        : new ApiError(
+            error instanceof Error ? error.message : "Une erreur s'est produite",
+            error instanceof ApiError ? error.status : undefined
+          );
+      
+      const errorMessage = apiError.getUserMessage();
+      
+      // Afficher l'erreur dans le message
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantMessageId
+            ? { ...msg, content: `❌ ${errorMessage}` }
+            : msg
+        )
+      );
+      
+      // Afficher un toast expressif
+      toast({
+        title: "Erreur lors de la requête",
+        description: errorMessage,
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -146,6 +184,28 @@ const Chat = () => {
     });
   };
 
+  const handleFeedback = async (messageId: string, feedbackType: 'thumbs_up' | 'thumbs_down') => {
+    try {
+      await apiClient.submitFeedback(messageId, feedbackType);
+      toast({
+        title: "Merci !",
+        description: "Votre avis a été enregistré",
+      });
+    } catch (error) {
+      const errorMessage = error instanceof ApiError 
+        ? error.getUserMessage() 
+        : error instanceof Error 
+        ? error.message 
+        : "Impossible d'enregistrer votre avis";
+      
+      toast({
+        title: "Erreur lors de l'enregistrement",
+        description: errorMessage,
+        variant: "destructive",
+      });
+    }
+  };
+
   const handleLogout = () => {
     logout();
     navigate("/");
@@ -153,6 +213,7 @@ const Chat = () => {
 
   const handleNewChat = () => {
     setMessages([]);
+    setConversationId(undefined);
   };
 
   const renderCitation = (text: string, citations?: Message["citations"]) => {
@@ -404,6 +465,7 @@ const Chat = () => {
                           variant="ghost"
                           size="sm"
                           className="h-8 px-2 text-muted-foreground hover:text-success"
+                          onClick={() => message.messageId && handleFeedback(message.messageId, 'thumbs_up')}
                         >
                           <ThumbsUp className="w-3.5 h-3.5" />
                         </Button>
@@ -411,6 +473,7 @@ const Chat = () => {
                           variant="ghost"
                           size="sm"
                           className="h-8 px-2 text-muted-foreground hover:text-destructive"
+                          onClick={() => message.messageId && handleFeedback(message.messageId, 'thumbs_down')}
                         >
                           <ThumbsDown className="w-3.5 h-3.5" />
                         </Button>

@@ -5,7 +5,19 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str
 
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    password: str
+    name: str
+    role: str = "user"  # "admin" | "user" - par défaut "user"
+
 class LoginResponse(BaseModel):
+    success: bool
+    token: Optional[str] = None
+    user: Optional[dict] = None
+    error: Optional[str] = None
+
+class RegisterResponse(BaseModel):
     success: bool
     token: Optional[str] = None
     user: Optional[dict] = None

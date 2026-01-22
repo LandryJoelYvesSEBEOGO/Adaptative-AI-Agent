@@ -62,19 +62,14 @@ source venv/bin/activate
 
 ### 4. Installer les dépendances
 
+**Méthode recommandée :** Utilisez le fichier `requirement.txt` pour installer toutes les dépendances :
+
 ```bash
-pip install streamlit
-pip install langchain-groq
-pip install langchain-community
-pip install langchain-core
-pip install langgraph
-pip install langchain-nomic
-pip install python-dotenv
-pip install faster-whisper
-pip install pyaudio
-pip install chromadb
-pip install tiktoken
+cd Backend
+pip install -r requirement.txt
 ```
+
+**Note importante :** Dans LangChain 0.3.0+, `text_splitter` a été déplacé vers le package `langchain-text-splitters` qui est inclus dans `requirement.txt`. Utilisez `from langchain_text_splitters import RecursiveCharacterTextSplitter` dans votre code.
 
 **Note pour PyAudio :** Sur Windows, si l'installation échoue, utilisez :
 ```bash

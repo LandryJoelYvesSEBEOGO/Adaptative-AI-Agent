@@ -2,7 +2,7 @@
 Stratégies de recovery adaptatives selon le type d'échec.
 """
 from typing import Dict, Optional, List
-from langchain.schema import Document
+from langchain_core.documents import Document
 from langchain_groq import ChatGroq
 
 from config.Config import Config

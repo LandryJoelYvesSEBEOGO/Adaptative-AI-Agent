@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException, status
 from datetime import timedelta
-from api.models.auth import LoginRequest, LoginResponse, UserResponse
+from api.models.auth import LoginRequest, LoginResponse, RegisterRequest, RegisterResponse, UserResponse
 from api.services.auth_service import (
     authenticate_user,
+    create_user,
     create_access_token,
     ACCESS_TOKEN_EXPIRE_MINUTES
 )
@@ -30,6 +31,43 @@ async def login(request: LoginRequest):
     )
     
     return LoginResponse(
+        success=True,
+        token=access_token,
+        user={
+            "id": user["id"],
+            "email": user["email"],
+            "name": user["name"],
+            "role": user["role"]
+        }
+    )
+
+@router.post("/register", response_model=RegisterResponse)
+async def register(request: RegisterRequest):
+    """
+    Crée un nouvel utilisateur et retourne un token JWT.
+    """
+    # Créer l'utilisateur
+    user = create_user(
+        email=request.email,
+        password=request.password,
+        name=request.name,
+        role=request.role
+    )
+    
+    if not user:
+        return RegisterResponse(
+            success=False,
+            error="Un utilisateur avec cet email existe déjà"
+        )
+    
+    # Créer le token
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user["email"], "role": user["role"]},
+        expires_delta=access_token_expires
+    )
+    
+    return RegisterResponse(
         success=True,
         token=access_token,
         user={

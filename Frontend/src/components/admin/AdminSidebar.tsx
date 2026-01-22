@@ -10,7 +10,6 @@ import {
   LogOut,
   ChevronLeft,
   ChevronRight,
-  Bot,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/authStore";
@@ -49,8 +48,12 @@ const AdminSidebar = ({ collapsed, onToggle }: AdminSidebarProps) => {
     >
       {/* Logo */}
       <div className="flex items-center gap-3 p-4 border-b border-sidebar-border h-16">
-        <div className="w-9 h-9 rounded-lg bg-foreground flex items-center justify-center shrink-0">
-          <Bot className="w-5 h-5 text-background" />
+        <div className="w-9 h-9 rounded-lg bg-foreground flex items-center justify-center shrink-0 overflow-hidden">
+          <img 
+            src="/logo_RAG_System.png" 
+            alt="RAG System Logo" 
+            className="w-full h-full object-contain p-1"
+          />
         </div>
         {!collapsed && (
           <div className="flex flex-col overflow-hidden">

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Bot, ArrowRight, Loader2, Eye, EyeOff } from "lucide-react";
+import { ArrowRight, Loader2, Eye, EyeOff } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -68,8 +68,12 @@ const Login = () => {
       <div className="w-full max-w-md relative z-10 animate-fade-up">
         {/* Logo */}
         <div className="flex items-center justify-center gap-3 mb-8">
-          <div className="w-12 h-12 rounded-xl bg-foreground flex items-center justify-center">
-            <Bot className="w-7 h-7 text-background" />
+          <div className="w-12 h-12 rounded-xl bg-foreground flex items-center justify-center overflow-hidden">
+            <img 
+              src="/logo_RAG_System.png" 
+              alt="RAG System Logo" 
+              className="w-full h-full object-contain p-1"
+            />
           </div>
           <div className="flex flex-col">
             <span className="font-oswald text-2xl font-medium tracking-tight">
@@ -185,7 +189,7 @@ const Login = () => {
                 type="button"
                 variant="outline"
                 className="w-full"
-                onClick={() => toast({ title: "Coming soon", description: "Google login will be available soon" })}
+                onClick={() => showErrorToast(new Error("Fonctionnalité à venir"), "Bientôt disponible")}
               >
                 <svg className="w-4 h-4" viewBox="0 0 24 24">
                   <path
@@ -211,7 +215,7 @@ const Login = () => {
                 type="button"
                 variant="outline"
                 className="w-full"
-                onClick={() => toast({ title: "Coming soon", description: "Microsoft login will be available soon" })}
+                onClick={() => showErrorToast(new Error("Fonctionnalité à venir"), "Bientôt disponible")}
               >
                 <svg className="w-4 h-4" viewBox="0 0 24 24">
                   <path fill="currentColor" d="M11.4 24H0V12.6h11.4V24zM24 24H12.6V12.6H24V24zM11.4 11.4H0V0h11.4v11.4zm12.6 0H12.6V0H24v11.4z" />

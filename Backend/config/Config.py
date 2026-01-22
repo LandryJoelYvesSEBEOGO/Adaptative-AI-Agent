@@ -9,7 +9,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
 class Config:
 
-    # Configuration des environnemnt
+    # Configuration des environnements
     os.environ["LANGCHAIN_TRACING_V2"] = "true"
     os.environ["LANGCHAIN_PROJECT"] = "local-llama32-rag"
     os.environ["TOKENIZERS_PARALLELISM"] = "true"
@@ -19,11 +19,32 @@ class Config:
     TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
     os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
     LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY")
-    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+    
+    # Clés API Groq multiples (séparées par des virgules dans .env)
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY")  # Clé principale
+    GROQ_API_KEYS_STR = os.getenv("GROQ_API_KEYS", "")  # Clés supplémentaires
+    # Nettoyer et parser les clés supplémentaires
+    GROQ_API_KEYS = [key.strip() for key in GROQ_API_KEYS_STR.split(",") if key.strip()]
+    # Ajouter la clé principale si elle existe
+    if GROQ_API_KEY:
+        all_keys = [GROQ_API_KEY] + GROQ_API_KEYS
+        # Supprimer les doublons en gardant l'ordre
+        GROQ_API_KEYS = list(dict.fromkeys(all_keys))
+    else:
+        GROQ_API_KEYS = GROQ_API_KEYS if GROQ_API_KEYS else []
 
     #Configuration des models 
     GROQ_model="openai/gpt-oss-120b"
     NomicEmbeddings_model="nomic-embed-text-v1.5"
+    
+    # Configuration Device (GPU/CPU)
+    FORCE_GPU = True  # Forcer l'utilisation du GPU (CUDA) même si la détection échoue
+    DEVICE_PREFERENCE = "cuda"  # "cuda" pour GPU, "cpu" pour CPU, "auto" pour détection automatique
+    
+    # Configuration Warnings et Logs
+    DISABLE_WARNINGS = True  # Désactiver les warnings Python/Transformers
+    SHOW_PROGRESS_BARS = True  # Afficher les barres de progression (tqdm)
+    DEBUG_METADATA = True  # Activer le debug des métadonnées pour diagnostiquer les problèmes
 
         # Configuration du workflow
     MAX_RETRIES = 3  # Nombre maximum de tentatives en cas d'échec
@@ -64,6 +85,7 @@ class Config:
     GRADING_ADAPTIVE_THRESHOLD = True  # Seuil adaptatif basé sur les scores moyens
         # Configuration Enrichissement Métadonnées
     METADATA_ENRICHMENT_ENABLED = True  # Activer/désactiver l'enrichissement
+    METADATA_USE_LOCAL_MODELS = True  # Si True, utilise modèles locaux (KeyBERT, spaCy, etc.), sinon utilise LLM (Groq)
     METADATA_DETECT_LANGUAGE = False  # Détection de langue (False = "en" par défaut pour l'instant)
     METADATA_EXTRACT_ENTITIES = True  # Extraire les entités nommées
     METADATA_EXTRACT_KEYWORDS = True  # Extraire les mots-clés
